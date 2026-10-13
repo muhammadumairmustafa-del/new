@@ -11,6 +11,7 @@ import { buildCashPlan } from "./cashplan.js";
 import { runChecks } from "./checks.js";
 import { DEFAULT_CASHPLAN, DEFAULT_TAX, getSetting, putSetting, type CashPlanSettings, type TaxSettings } from "./settings.js";
 import { statementsWorkbook } from "./export.js";
+import { DEFAULT_SFP, loadSfpLines, proposeAccruals, readSfpFromEnv, reconcile, storeSnapshot } from "./sfp.js";
 import { fiscalYearOf, fyRange, monthEnd, monthsBetween } from "../shared/fiscal.js";
 import { fromUnits, toUnits } from "../shared/money.js";
 
@@ -374,6 +375,39 @@ export function apiRouter(db: Db) {
     await log(req, "import.delete", { id: Number(req.params.id) }); res.json({ ok: true });
   }));
 
+  // ------------------------------------------------------------------ Sales Flow Pro (revenue source)
+  r.get("/sfp/status", wrap(async (_req, res) => {
+    const { lastSync, lines } = await loadSfpLines(db);
+    res.json({ configured: !!process.env.SFP_DATABASE_URL, lastSync, campaigns: lines.length });
+  }));
+  r.post("/sfp/sync", requireRole("accountant"), wrap(async (req, res) => {
+    const snapshot = await readSfpFromEnv();
+    await storeSnapshot(db, snapshot);
+    await log(req, "sfp.sync", { campaigns: snapshot.campaigns.length, payments: snapshot.payments.length });
+    res.json({ ok: true, campaigns: snapshot.campaigns.length, payments: snapshot.payments.length, targets: snapshot.targets.length });
+  }));
+  r.get("/sfp/revenue", wrap(async (req, res) => {
+    const s = await snap(req); const asOf = await asOfOf(req, s);
+    const fy = Number(req.query.fy) || fiscalYearOf(asOf);
+    const { lines, lastSync, settings } = await loadSfpLines(db);
+    const sales = new Map<string, number>();
+    for (const l of s.lines) if (l.account.system_role === "revenue") sales.set(l.date.slice(0, 7), (sales.get(l.date.slice(0, 7)) ?? 0) + fromUnits(l.cr - l.dr));
+    const rec = await reconcile(db, lines, fy, sales);
+    const { from, to } = fyRange(fy);
+    const targets = (await db.query<any>("SELECT data FROM sfp_targets")).map((t) => (typeof t.data === "string" ? JSON.parse(t.data) : t.data));
+    res.json({ lastSync, settings, booksTo: asOf, ...rec,
+      campaigns: lines.filter((l) => l.month >= from.slice(0, 7) && l.month <= to.slice(0, 7)).sort((a, b) => (a.month < b.month ? 1 : -1)),
+      unbookedMonths: rec.byMonth.filter((m) => m.month > asOf.slice(0, 7) && m.revenue > 0).map((m) => m.month),
+      targets });
+  }));
+  r.post("/sfp/accruals", requireRole("partner"), wrap(async (req, res) => {
+    const s = await snap(req); const asOf = lastActivityDate(s) ?? todayPk();
+    const upTo = typeof req.body?.upTo === "string" && dateRe.test(req.body.upTo) ? req.body.upTo : todayPk();
+    const { lines, settings } = await loadSfpLines(db);
+    const r2 = await proposeAccruals(db, lines, settings, asOf, upTo, req.user!.id);
+    await log(req, "sfp.accruals", r2); res.json(r2);
+  }));
+
   // ------------------------------------------------------------------ partners & settings
   r.patch("/partners/:id", requireRole("partner"), wrap(async (req, res) => {
     const b = z.object({ ratio: z.number().min(0).max(1).optional(), committed_capital: z.number().min(0).optional(), aka: z.string().nullable().optional() }).parse(req.body);
@@ -382,13 +416,13 @@ export function apiRouter(db: Db) {
     await log(req, "partner.update", { id, ...b }); res.json({ ok: true });
   }));
   r.get("/settings/:key", wrap(async (req, res) => {
-    const defs: Record<string, unknown> = { tax: DEFAULT_TAX, cashplan: DEFAULT_CASHPLAN, company: { name: "TonePerks LLP" } };
+    const defs: Record<string, unknown> = { tax: DEFAULT_TAX, cashplan: DEFAULT_CASHPLAN, company: { name: "TonePerks LLP" }, sfp: DEFAULT_SFP };
     if (!(req.params.key in defs)) return res.status(404).json({ error: "Unknown setting" });
     res.json(await getSetting(db, req.params.key, defs[req.params.key]));
   }));
   r.put("/settings/:key", requireRole("partner"), wrap(async (req, res) => {
     const key = req.params.key;
-    if (!["tax", "cashplan", "company"].includes(key)) return res.status(404).json({ error: "Unknown setting" });
+    if (!["tax", "cashplan", "company", "sfp"].includes(key)) return res.status(404).json({ error: "Unknown setting" });
     if (typeof req.body !== "object" || req.body === null) return res.status(400).json({ error: "Invalid body" });
     await putSetting(db, key, req.body); await log(req, "settings.update", { key }); res.json({ ok: true });
   }));

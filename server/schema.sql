@@ -140,3 +140,18 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail JSONB,
   at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
+;
+CREATE TABLE IF NOT EXISTS sfp_campaigns (
+  id TEXT PRIMARY KEY,
+  data JSONB NOT NULL,
+  synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS sfp_payments (
+  id TEXT PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  data JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sfp_targets (
+  id TEXT PRIMARY KEY,
+  data JSONB NOT NULL
+)

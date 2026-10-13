@@ -10,6 +10,7 @@ It replaces the earlier Replit portal, which computed statements in the browser 
 | --- | --- |
 | **Dashboard** | Fiscal-year KPIs, monthly results, cash vs receivables, live audit findings and a 13-week cash forecast |
 | **Financial statements** | P&L by month, balance sheet at each month-end (with an option to show partners' current accounts inside partners' funds), direct cash flow, trial balance. Excel pack export and print |
+| **Revenue (Sales Flow Pro)** | Read-only sync of campaigns from Sales Flow Pro, with value, Jazz share and TonePerks share. Shows revenue by month and source, reconciles against the invoice register and the ledger by client, and proposes revenue accruals for months not yet in the books |
 | **Cash & payment plan** | Every obligation (income tax, s.147 advance tax, salary and sales tax, payroll, Jazz share on collected and uncollected invoices, vendors, partner salaries) in priority order. Includes due dates, overdue days, a probability-weighted collections forecast and a weekly cash forecast with the funding gap. Due dates, amounts and deferrals can be adjusted |
 | **Tax** | AOP income-tax computation with configurable slabs, s.4AB surcharge, super tax, add-backs and WHT credit. Compares against the tax booked; computes the s.147 advance-tax schedule |
 | **Receivables** | Ageing by customer from the invoice register. Expected payment dates and collection probabilities feed the cash plan |
@@ -29,6 +30,7 @@ npm run build && npm start   # single server on $PORT (default 5000)
 ```
 
 - **Database:** set `DATABASE_URL` to use PostgreSQL (Replit, Neon, Supabase…). Without it, the app uses an embedded PGlite database in `./.data/`. Back that folder up if you rely on it.
+- **Sales Flow Pro:** set the `SFP_DATABASE_URL` secret (Replit → Secrets) to a **read-only** database user. The app opens the connection in read-only mode and never writes to Sales Flow Pro.
 - **First visit:** you create the partner (admin) account. Then go to **Import accounts** and upload the FY2026 year-end workbook first, then the FY2027 period workbooks in date order.
 - **Tests:** `npm test` runs on synthetic data only.
 
