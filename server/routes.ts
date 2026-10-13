@@ -340,10 +340,11 @@ export function apiRouter(db: Db) {
       findings: z.array(zFinding).default([]),
       questions: z.array(z.object({ code: z.string(), topic: z.string(), question: z.string(), why: z.string().optional() })).default([]),
       proposedEntries: z.array(z.object({ date: zDate, ref: z.string(), memo: z.string(), lines: z.array(z.object({ account: z.string(), debit: z.number().min(0), credit: z.number().min(0), description: z.string().optional() })) })).default([]),
-      settings: z.object({ cashplan: z.record(z.unknown()).optional(), company: z.record(z.unknown()).optional(), tax: z.record(z.unknown()).optional() }).optional(),
+      settings: z.object({ cashplan: z.record(z.unknown()).optional(), company: z.record(z.unknown()).optional(), tax: z.record(z.unknown()).optional(), sfp: z.record(z.unknown()).optional() }).optional(),
     }).parse(JSON.parse(raw));
     if (pack.settings?.cashplan) await putSetting(db, "cashplan", { ...(await getSetting(db, "cashplan", DEFAULT_CASHPLAN)), ...pack.settings.cashplan });
     if (pack.settings?.company) await putSetting(db, "company", { ...(await getSetting(db, "company", { name: "TonePerks LLP", defaultFy: null })), ...pack.settings.company });
+    if (pack.settings?.sfp) await putSetting(db, "sfp", { ...(await getSetting(db, "sfp", DEFAULT_SFP)), ...pack.settings.sfp });
     if (pack.settings?.tax) await putSetting(db, "tax", { ...(await getSetting(db, "tax", DEFAULT_TAX)), ...pack.settings.tax });
     const accts = new Map((await db.query<any>("SELECT id, name FROM accounts")).map((a) => [a.name, a.id]));
     const missing = [...new Set(pack.proposedEntries.flatMap((e) => e.lines.map((l) => l.account)).filter((n) => !accts.has(n)))];
@@ -392,20 +393,24 @@ export function apiRouter(db: Db) {
     const { lines, lastSync, settings } = await loadSfpLines(db);
     const sales = new Map<string, number>();
     for (const l of s.lines) if (l.account.system_role === "revenue") sales.set(l.date.slice(0, 7), (sales.get(l.date.slice(0, 7)) ?? 0) + fromUnits(l.cr - l.dr));
-    const rec = await reconcile(db, lines, fy, sales);
+    const rec = await reconcile(db, lines, fy, sales, settings.clientAliases ?? {}, today(req));
     const { from, to } = fyRange(fy);
     const targets = (await db.query<any>("SELECT data FROM sfp_targets")).map((t) => (typeof t.data === "string" ? JSON.parse(t.data) : t.data));
     res.json({ lastSync, settings, booksTo: asOf, ...rec,
       campaigns: lines.filter((l) => l.month >= from.slice(0, 7) && l.month <= to.slice(0, 7)).sort((a, b) => (a.month < b.month ? 1 : -1)),
-      unbookedMonths: rec.byMonth.filter((m) => m.month > asOf.slice(0, 7) && m.revenue > 0).map((m) => m.month),
+      unbookedMonths: rec.byMonth.filter((m) => m.month > asOf.slice(0, 7) && m.month <= today(req).slice(0, 7) && m.revenue > 0).map((m) => m.month),
       targets });
   }));
   r.post("/sfp/accruals", requireRole("partner"), wrap(async (req, res) => {
-    const s = await snap(req); const asOf = lastActivityDate(s) ?? todayPk();
-    const upTo = typeof req.body?.upTo === "string" && dateRe.test(req.body.upTo) ? req.body.upTo : todayPk();
+    const b = z.object({ fys: z.array(z.number().int()).min(1).max(5) }).parse(req.body);
+    const s = await snap(req);
     const { lines, settings } = await loadSfpLines(db);
-    const r2 = await proposeAccruals(db, lines, settings, asOf, upTo, req.user!.id);
-    await log(req, "sfp.accruals", r2); res.json(r2);
+    const sales = new Map<string, number>();
+    for (const l of s.lines) if (l.account.system_role === "revenue") sales.set(l.date.slice(0, 7), (sales.get(l.date.slice(0, 7)) ?? 0) + fromUnits(l.cr - l.dr));
+    const items = [];
+    for (const fy of b.fys) items.push(...(await reconcile(db, lines, fy, sales, settings.clientAliases ?? {}, today(req))).notInvoiced);
+    const r2 = await proposeAccruals(db, items, today(req), req.user!.id);
+    await log(req, "sfp.accruals", { ...r2, fys: b.fys }); res.json(r2);
   }));
 
   // ------------------------------------------------------------------ partners & settings

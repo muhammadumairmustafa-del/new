@@ -15,11 +15,14 @@ export interface SfpSettings {
   gstRate: number;
   /** TonePerks share by source when SFP has no explicit split. */
   defaultShare: Record<"jazz_internal" | "jazz_sourced" | "callperks_sourced", number>;
+  /** Map a client name (as written in SFP or the register) to a common name for reconciliation. */
+  clientAliases: Record<string, string>;
 }
-export const DEFAULT_SFP: SfpSettings = { gstRate: 0.15, defaultShare: { jazz_internal: 0.10, jazz_sourced: 0.30, callperks_sourced: 0.60 } };
+export const DEFAULT_SFP: SfpSettings = { gstRate: 0.15, defaultShare: { jazz_internal: 0.10, jazz_sourced: 0.30, callperks_sourced: 0.60 }, clientAliases: {} };
 
 const WANT_CAMPAIGN = ["id", "campaign_code", "client_name", "type", "source", "status", "start_date", "end_date", "revenue_pkr", "jazz_share_pkr",
-  "callperks_share_pkr", "billing_type", "is_monthly_retainer", "campaign_month", "campaign_year", "manager_id", "created_at", "notes"];
+  "callperks_share_pkr", "billing_type", "is_monthly_retainer", "campaign_month", "campaign_year", "manager_id", "created_at", "notes",
+  "payment_received_date", "target_impressions", "actual_impressions"];
 const WANT_PAYMENT = ["id", "campaign_id", "month", "year", "payment_received_date", "amount_pkr"];
 const WANT_TARGET = ["id", "year", "month", "revenue_type", "target_pkr", "actual_pkr", "campaigns_run", "deals_closed"];
 
@@ -103,9 +106,11 @@ export function revenueLine(c: any, s: SfpSettings): SfpLine {
   const tp = explicitTp ?? value * s.defaultShare[src];
   const jazz = explicitJazz ?? value - tp;
   const foc = String(c.billing_type ?? "").toUpperCase() === "FOC";
+  // campaign_month/year in SFP are often left at a default, so the start date decides the month.
   let month: string;
-  if (c.campaign_year && c.campaign_month) month = `${c.campaign_year}-${String(c.campaign_month).padStart(2, "0")}`;
-  else month = (c.start_date ? isoDate(c.start_date) : isoDate(c.created_at ?? new Date())).slice(0, 7);
+  if (c.start_date) month = isoDate(c.start_date).slice(0, 7);
+  else if (c.campaign_year && c.campaign_month) month = `${c.campaign_year}-${String(c.campaign_month).padStart(2, "0")}`;
+  else month = isoDate(c.created_at ?? new Date()).slice(0, 7);
   const revenue = foc ? 0 : src === "callperks_sourced" ? value : tp;
   const platformFee = foc ? 0 : src === "callperks_sourced" ? jazz : 0;
   return { id: String(c.id), code: c.campaign_code ?? null, client: String(c.client_name ?? "").trim(), type: c.type ?? null, source: src, sourceLabel: c.source ?? src,
@@ -114,10 +119,37 @@ export function revenueLine(c: any, s: SfpSettings): SfpLine {
     basis: foc ? "Free of charge" : src === "callperks_sourced" ? "Full value invoiced; Jazz share is a platform fee" : "TonePerks share only (Jazz collects)" + (explicitTp === null ? " — default split" : "") };
 }
 
+/**
+ * Monthly retainers (e.g. the Jazz Cash recovery campaign) carry one SFP payment row per service month
+ * with that month's campaign value. Each becomes its own revenue line, split in the campaign's ratio.
+ */
+export function campaignLines(c: any, payments: any[], s: SfpSettings): SfpLine[] {
+  const base = revenueLine(c, s);
+  const rows = payments.filter((p) => String(p.campaign_id) === String(c.id) && p.year && p.month);
+  if (!c.is_monthly_retainer || !rows.length) return [base];
+  const seen = new Set<string>();
+  const out: SfpLine[] = [];
+  for (const p of rows.sort((a, b) => a.year - b.year || a.month - b.month)) {
+    const month = `${p.year}-${String(p.month).padStart(2, "0")}`;
+    if (seen.has(month)) continue; // duplicate rows for a month (e.g. an empty placeholder) count once
+    const value = num(p.amount_pkr) ?? num(c.revenue_pkr) ?? 0;
+    if (!value) continue;
+    seen.add(month);
+    const ratio = base.campaignValue ? base.toneperksShare / base.campaignValue : s.defaultShare[base.source];
+    const tp = value * ratio, jazz = value - tp;
+    out.push({ ...base, id: `${base.id}:${month}`, month, campaignValue: value, toneperksShare: tp, jazzShare: jazz,
+      revenue: base.foc ? 0 : base.source === "callperks_sourced" ? value : tp, platformFee: base.foc ? 0 : base.source === "callperks_sourced" ? jazz : 0,
+      basis: `${base.basis} · retainer month` });
+  }
+  return out.length ? out : [base];
+}
+
 export async function loadSfpLines(db: Db) {
   const s = { ...DEFAULT_SFP, ...((await db.query<any>("SELECT value FROM settings WHERE key='sfp'"))[0]?.value ?? {}) } as SfpSettings;
-  const rows = await db.query<any>("SELECT data FROM sfp_campaigns");
-  const lines = rows.map((r) => revenueLine(typeof r.data === "string" ? JSON.parse(r.data) : r.data, s));
+  const parse = (r: any) => (typeof r.data === "string" ? JSON.parse(r.data) : r.data);
+  const rows = (await db.query<any>("SELECT data FROM sfp_campaigns")).map(parse);
+  const payments = (await db.query<any>("SELECT data FROM sfp_payments")).map(parse);
+  const lines = rows.flatMap((c) => campaignLines(c, payments, s));
   const lastSync = (await db.query<any>("SELECT value FROM settings WHERE key='sfp.lastSync'"))[0]?.value ?? null;
   return { settings: s, lines, lastSync };
 }
@@ -127,7 +159,24 @@ export function normClient(n: string) {
   return n.toLowerCase().replace(/\(.*?\)/g, " ").replace(/\b(pvt|private|ltd|limited|pakistan|plc|co|company|bank|the|via)\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean).slice(0, 2).join(" ");
 }
 
-export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSalesByMonth: Map<string, number>) {
+/**
+ * Groups client names that refer to the same customer: explicit aliases first, then names whose
+ * normalised form is a prefix of another ("metro" ~ "metro cash carry", "jazzcash" ~ "jazz cash").
+ */
+export function clientKeyer(names: string[], aliases: Record<string, string>) {
+  const norm = (n: string) => n.toLowerCase().replace(/\(.*?\)/g, " ").replace(/\b(pvt|private|ltd|limited|pakistan|plc|co|company|bank|the|via|inc)\b/g, " ").replace(/[^a-z0-9]+/g, "");
+  const aliasNorm = new Map(Object.entries(aliases).map(([k, v]) => [norm(k), norm(v)]));
+  const base = (n: string) => { const c = norm(n) || n.toLowerCase(); return aliasNorm.get(c) ?? c; };
+  const uniq = [...new Set(names.map(base))].sort((a, b) => a.length - b.length);
+  const root = new Map<string, string>();
+  for (const k of uniq) {
+    const parent = [...root.keys()].find((r) => r.length >= 3 && k.startsWith(r));
+    root.set(k, parent ? root.get(parent)! : k);
+  }
+  return (n: string) => root.get(base(n)) ?? base(n);
+}
+
+export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSalesByMonth: Map<string, number>, aliases: Record<string, string> = {}, today = new Date().toISOString().slice(0, 10)) {
   const { from, to } = fyRange(fy);
   const months = monthsBetween(from, to);
   const inFy = lines.filter((l) => l.month >= from.slice(0, 7) && l.month <= to.slice(0, 7));
@@ -142,43 +191,75 @@ export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSale
       invoiced: inv.filter((i) => i.month === m).reduce((a, i) => a + i.net, 0), booked: ledgerSalesByMonth.get(m) ?? 0 };
   });
   const clients = new Map<string, any>();
-  const key = (n: string) => normClient(n) || n.toLowerCase();
+  const key = clientKeyer([...inFy.map((l) => l.client), ...inv.map((i) => i.client)], aliases);
   for (const l of inFy) { const k = key(l.client); const c = clients.get(k) ?? { key: k, names: new Set<string>(), sfpRevenue: 0, sfpPlatformFee: 0, invoiced: 0, invoicedJazz: 0, campaigns: 0, invoices: 0 }; c.names.add(l.client); c.sfpRevenue += l.revenue; c.sfpPlatformFee += l.platformFee; c.campaigns++; clients.set(k, c); }
   for (const i of inv) { const k = key(i.client); const c = clients.get(k) ?? { key: k, names: new Set<string>(), sfpRevenue: 0, sfpPlatformFee: 0, invoiced: 0, invoicedJazz: 0, campaigns: 0, invoices: 0 }; c.names.add(i.client); c.invoiced += i.net; c.invoicedJazz += i.jazz; c.invoices++; clients.set(k, c); }
   const byClient = [...clients.values()].map((c) => ({ ...c, names: [...c.names], difference: c.sfpRevenue - c.invoiced, jazzDifference: c.sfpPlatformFee - c.invoicedJazz }))
     .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
-  return { fy, from, to, byMonth, byClient, totals: {
+  // Campaign-by-invoice matching across ALL periods (invoices often follow the service month).
+  const allInv = (await db.query<any>("SELECT id, number, client, invoice_date, net_amount, status FROM invoices WHERE coalesce(status,'') <> 'cancelled' AND net_amount > 0"))
+    .map((i) => ({ id: i.id, number: i.number, client: i.client as string, date: isoDate(i.invoice_date), net: Number(i.net_amount) }));
+  const k2 = clientKeyer([...lines.map((l) => l.client), ...allInv.map((i) => i.client)], aliases);
+  const used = new Set<number>();
+  const monthStart = (m: string) => `${m}-01`;
+  const days = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86400000;
+  const matches = new Map<string, any>();
+  const billable = lines.filter((l) => l.revenue > 0).sort((a, b) => (a.month < b.month ? -1 : 1));
+  for (const l of billable) {
+    const cands = allInv.filter((i) => !used.has(i.id) && k2(i.client) === k2(l.client) && days(monthStart(l.month), i.date) >= -45 && days(monthStart(l.month), i.date) <= 185);
+    cands.sort((a, b) => Math.abs(a.net - l.revenue) / l.revenue - Math.abs(b.net - l.revenue) / l.revenue || (a.date < b.date ? -1 : 1));
+    const best = cands.find((i) => Math.abs(i.net - l.revenue) <= Math.max(0.25 * l.revenue, 1000));
+    if (best) { used.add(best.id); matches.set(l.id, best); }
+  }
+  // Second pass: one invoice can bill several campaigns of the same customer (e.g. branches, repeats).
+  for (const inv of allInv.filter((i) => !used.has(i.id))) {
+    const pool = billable.filter((l) => !matches.has(l.id) && k2(l.client) === k2(inv.client) && days(monthStart(l.month), inv.date) >= -45 && days(monthStart(l.month), inv.date) <= 185).slice(0, 12);
+    let best: SfpLine[] | null = null;
+    for (let mask = 1; mask < 1 << pool.length; mask++) {
+      const sub = pool.filter((_, i) => mask & (1 << i));
+      if (sub.length < 2) continue;
+      const sum = sub.reduce((a, l) => a + l.revenue, 0);
+      if (Math.abs(sum - inv.net) <= Math.max(0.02 * inv.net, 1000) && (!best || sub.length < best.length)) best = sub;
+    }
+    if (best) { used.add(inv.id); for (const l of best) matches.set(l.id, { ...inv, net: l.revenue, grouped: best.length }); }
+  }
+  const inFyIds = new Set(inFy.map((l) => l.id));
+  const notInvoiced = billable.filter((l) => inFyIds.has(l.id) && !matches.has(l.id) && l.month <= today.slice(0, 7))
+    .map((l) => ({ id: l.id, month: l.month, client: l.client, code: l.code, source: l.source, revenue: l.revenue, platformFee: l.platformFee, status: l.status }));
+  const matched = billable.filter((l) => inFyIds.has(l.id) && matches.has(l.id))
+    .map((l) => ({ id: l.id, month: l.month, client: l.client, code: l.code, revenue: l.revenue, invoice: matches.get(l.id).number, invoiceDate: matches.get(l.id).date, invoiced: matches.get(l.id).net, difference: l.revenue - matches.get(l.id).net }));
+  const invoicedNotInSfp = allInv.filter((i) => !used.has(i.id) && i.date >= from && i.date <= to);
+  return { fy, from, to, byMonth, byClient, notInvoiced, matched, invoicedNotInSfp, totals: {
+    notInvoiced: notInvoiced.reduce((a, l) => a + l.revenue, 0),
     sfpRevenue: inFy.reduce((a, l) => a + l.revenue, 0), sfpPlatformFee: inFy.reduce((a, l) => a + l.platformFee, 0),
     invoiced: inv.reduce((a, i) => a + i.net, 0), invoicedJazz: inv.reduce((a, i) => a + i.jazz, 0), booked: [...ledgerSalesByMonth.entries()].filter(([m]) => months.includes(m)).reduce((a, [, v]) => a + v, 0) } };
 }
 
-/** Proposed revenue accruals from SFP for months after the last date in the books. */
-export async function proposeAccruals(db: Db, lines: SfpLine[], s: SfpSettings, afterDate: string, upTo: string, userId: number | null) {
+/**
+ * Proposed accruals for campaign revenue that has no invoice yet (accrued / unbilled revenue).
+ * Dr Receivable (unbilled) / Cr Sales, and for TonePerks-sourced campaigns Dr Platform fee / Cr Payable to Jazz.
+ * No sales tax: output tax arises when the invoice is issued. Re-running replaces earlier SFP proposals.
+ */
+export async function proposeAccruals(db: Db, items: { id: string; month: string; client: string; code: string | null; source: string; revenue: number; platformFee: number }[], upTo: string, userId: number | null) {
   const accts = new Map((await db.query<any>("SELECT id, system_role FROM accounts WHERE system_role IS NOT NULL")).map((a) => [a.system_role, a.id]));
-  const need = ["receivable", "revenue", "sales_tax_payable", "platform_fee", "jazz_payable"];
+  const need = ["receivable", "revenue", "platform_fee", "jazz_payable"];
   const miss = need.filter((r) => !accts.has(r));
   if (miss.length) throw new Error(`Import the accounts first (missing account roles: ${miss.join(", ")})`);
-  const months = new Set(monthsBetween(afterDate, upTo).filter((m) => monthEnd(m) > afterDate));
-  const todo = lines.filter((l) => months.has(l.month) && l.revenue > 0);
+  const todo = items.filter((l) => l.revenue > 0 && l.month <= upTo.slice(0, 7));
   return db.tx(async (q) => {
-    await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'sfp-accrual' AND entry_date > $1", [afterDate]);
-    let n = 0;
+    await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'sfp-accrual'");
     for (const l of todo) {
-      const gst = Math.round(l.revenue * s.gstRate * 100) / 100;
       const date = monthEnd(l.month) > upTo ? upTo : monthEnd(l.month);
-      const ref = `SFP-${l.code ?? l.id.slice(0, 8)}-${l.month}`;
-      const lines2 = [
-        { accountId: accts.get("receivable"), debit: l.revenue + gst, credit: 0, description: `${l.client} (${l.sourceLabel})` },
-        { accountId: accts.get("revenue"), debit: 0, credit: l.revenue, description: l.basis },
-        { accountId: accts.get("sales_tax_payable"), debit: 0, credit: gst, description: `Output tax ${(s.gstRate * 100).toFixed(0)}%` },
+      const lines2: any[] = [
+        { accountId: accts.get("receivable"), debit: l.revenue, credit: 0, description: `Unbilled: ${l.client}` },
+        { accountId: accts.get("revenue"), debit: 0, credit: l.revenue, description: `Sales Flow Pro ${l.code ?? ""} ${l.month}` },
       ];
       if (l.platformFee > 0) lines2.push(
         { accountId: accts.get("platform_fee"), debit: l.platformFee, credit: 0, description: "Jazz share" },
         { accountId: accts.get("jazz_payable"), debit: 0, credit: l.platformFee, description: "Jazz share" });
-      await postEntry(q, { date, ref, memo: `Revenue accrual from Sales Flow Pro: ${l.client} ${l.type ?? ""} ${l.month}`, source: "sfp-accrual", kind: "proposed", userId, lines: lines2 as any });
-      n++;
+      await postEntry(q, { date, ref: `SFP-${l.code ?? l.id.slice(0, 8)}-${l.month}`, memo: `Accrued revenue, not yet invoiced (Sales Flow Pro): ${l.client} ${l.month}`, source: "sfp-accrual", kind: "proposed", userId, lines: lines2 });
     }
-    return { entries: n, months: [...months], revenue: todo.reduce((a, l) => a + l.revenue, 0) };
+    return { entries: todo.length, revenue: todo.reduce((a, l) => a + l.revenue, 0), months: [...new Set(todo.map((l) => l.month))] };
   });
 }
 export { fiscalYearOf };

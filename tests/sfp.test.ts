@@ -47,11 +47,13 @@ describe("Sales Flow Pro", () => {
     // accounts with the roles the accrual needs
     for (const [code, name, type, role] of [["1100", "Receivable", "asset", "receivable"], ["4000", "Sales", "income", "revenue"], ["2110", "Sales Tax Payable", "liability", "sales_tax_payable"], ["5000", "Platform Fee", "expense", "platform_fee"], ["2000", "Payable to Jazz", "liability", "jazz_payable"]])
       await db.query("INSERT INTO accounts (code, name, type, grp, fs_line, system_role) VALUES ($1,$2,$3,'g','f',$4)", [code, name, type, role]);
-    const r = await proposeAccruals(db, lines, DEFAULT_SFP, "2025-09-30", "2025-10-31", null);
+    const rec2 = await reconcile(db, lines, 2026, new Map(), {}, "2025-10-31");
+    expect(rec2.notInvoiced.map((l: any) => l.month)).toEqual(["2025-08", "2025-10"]); // wallet share + October campaign
+    const r = await proposeAccruals(db, rec2.notInvoiced.filter((l: any) => l.month === "2025-10"), "2025-10-31", null);
     expect(r.entries).toBe(1);
     const [{ dr, cr }] = await db.query<any>("SELECT sum(debit)::float AS dr, sum(credit)::float AS cr FROM journal_lines");
-    expect(dr).toBeCloseTo(2000000 * 1.15 + 800000); expect(dr).toBeCloseTo(cr);
-    const again = await proposeAccruals(db, lines, DEFAULT_SFP, "2025-09-30", "2025-10-31", null);
+    expect(dr).toBeCloseTo(2000000 + 800000); expect(dr).toBeCloseTo(cr);
+    const again = await proposeAccruals(db, rec2.notInvoiced.filter((l: any) => l.month === "2025-10"), "2025-10-31", null);
     expect(again.entries).toBe(1);
     const [{ n }] = await db.query<any>("SELECT count(*)::int AS n FROM journal_entries");
     expect(n).toBe(1); // re-running replaces, never duplicates

@@ -6,7 +6,7 @@ import { usePeriod } from "../App";
 import { Badge, Button, Callout, Card, Loading, Money, PageHeader, Stat, Tabs } from "../components/ui";
 import { dmy, fyLabel, monthLabel, pkr } from "../format";
 
-type Tab = "monthly" | "reconcile" | "campaigns";
+type Tab = "monthly" | "uninvoiced" | "reconcile" | "campaigns";
 const SRC: Record<string, { label: string; color: string; tone: string }> = {
   callperks_sourced: { label: "TonePerks sourced", color: "hsl(160 75% 35%)", tone: "good" },
   jazz_sourced: { label: "Jazz sourced", color: "hsl(195 80% 40%)", tone: "info" },
@@ -20,7 +20,7 @@ export default function Revenue() {
   const [tab, setTab] = useState<Tab>("monthly");
   const [msg, setMsg] = useState<{ tone: "info" | "bad"; text: string } | null>(null);
   const sync = useMut(() => api("/sfp/sync", { method: "POST" }));
-  const accrue = useMut(() => api("/sfp/accruals", { method: "POST", body: {} }));
+  const accrue = useMut(() => api("/sfp/accruals", { method: "POST", body: { fys: [fy] } }));
   const role = meta?.user?.role;
   const doSync = () => sync.mutate(undefined, { onSuccess: (r: any) => setMsg({ tone: "info", text: `Synced ${r.campaigns} campaigns and ${r.payments} payment records from Sales Flow Pro.` }), onError: (e: any) => setMsg({ tone: "bad", text: e.message }) });
   const doAccrue = () => accrue.mutate(undefined, { onSuccess: (r: any) => setMsg({ tone: "info", text: `${r.entries} proposed revenue accruals (PKR ${pkr(r.revenue)}) created for ${r.months.join(", ") || "no months"}. Review them in Ledger → Journal entries (Proposed).` }), onError: (e: any) => setMsg({ tone: "bad", text: e.message }) });
@@ -29,7 +29,7 @@ export default function Revenue() {
       actions={<>
         {status.data?.lastSync && <span className="text-xs text-muted-foreground">Last sync {dmy(status.data.lastSync.at)} {String(status.data.lastSync.at).slice(11, 16)}</span>}
         {role !== "viewer" && <Button variant="secondary" onClick={doSync} disabled={sync.isPending || !status.data?.configured}><RefreshCw size={15} className={sync.isPending ? "animate-spin" : ""} />Sync Sales Flow Pro</Button>}
-        {role === "partner" && <Button onClick={doAccrue} disabled={accrue.isPending || !status.data?.campaigns}>Propose accruals after books</Button>}
+        {role === "partner" && <Button onClick={doAccrue} disabled={accrue.isPending || !status.data?.campaigns}>Propose accruals for uninvoiced</Button>}
       </>} />);
   if (!status.data) return <Loading q={status} />;
   if (!status.data.campaigns) return (
@@ -48,15 +48,16 @@ export default function Revenue() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <Stat icon={TrendingUp} tone="blue" label="Revenue per Sales Flow Pro" value={<Money v={t.sfpRevenue} compact />} sub={`${d.campaigns.length} campaigns in ${fyLabel(fy)}`} />
         <Stat icon={FileCheck2} tone="good" label="Invoiced (register)" value={<Money v={t.invoiced} compact />} sub={`Booked in ledger ${pkr(t.booked, { compact: true })}`} />
-        <Stat icon={AlertTriangle} tone={Math.abs(t.sfpRevenue - t.invoiced) > 1000 ? "warn" : "good"} label="Not yet invoiced / difference" value={<Money v={t.sfpRevenue - t.invoiced} compact />} sub="Sales Flow Pro minus invoice register" />
+        <Stat icon={AlertTriangle} tone={t.notInvoiced > 1000 ? "warn" : "good"} label="Campaigns with no invoice" value={<Money v={t.notInvoiced} compact />} sub={`${d.notInvoiced.length} campaign-months · SFP minus register ${pkr(t.sfpRevenue - t.invoiced, { compact: true })}`} />
         <Stat icon={Handshake} tone="warn" label="Jazz share per Sales Flow Pro" value={<Money v={t.sfpPlatformFee} compact />} sub={`In the register: ${pkr(t.invoicedJazz, { compact: true })}`} />
       </div>
-      {d.unbookedMonths.length > 0 && <Callout tone="info" title="Months not yet in the books">{d.unbookedMonths.map(monthLabel).join(", ")} have campaign revenue in Sales Flow Pro but no accounts yet. Use <b>Propose accruals after books</b> to see them in the statements as proposed entries until the accountant's file arrives.</Callout>}
-      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ id: "monthly", label: "By month" }, { id: "reconcile", label: "Reconciliation by client" }, { id: "campaigns", label: "Campaigns" }]} />
+      {d.unbookedMonths.length > 0 && <Callout tone="info" title="Months not yet in the books">{d.unbookedMonths.map(monthLabel).join(", ")} have campaign revenue in Sales Flow Pro but no accounts yet. Use <b>Propose accruals for uninvoiced</b> to see them in the statements as proposed entries until they are invoiced and the accountant's file arrives.</Callout>}
+      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ id: "monthly", label: "By month" }, { id: "uninvoiced", label: `Not invoiced (${d.notInvoiced.length})` }, { id: "reconcile", label: "Reconciliation by client" }, { id: "campaigns", label: "Campaigns" }]} />
       {tab === "monthly" && <Monthly d={d} />}
+      {tab === "uninvoiced" && <NotInvoiced d={d} />}
       {tab === "reconcile" && <Reconcile d={d} />}
       {tab === "campaigns" && <Campaigns d={d} />}
-      <p className="text-xs text-muted-foreground">Policy: TonePerks-sourced campaigns are revenue at full value with the Jazz share as a platform fee; Jazz-sourced / Jazz-internal campaigns (e.g. Jazz Cash) are revenue at the TonePerks share only. Free-of-charge campaigns carry no revenue. Sales tax {(d.settings.gstRate * 100).toFixed(0)}% on accruals.</p>
+      <p className="text-xs text-muted-foreground">Policy: TonePerks-sourced campaigns are revenue at full value with the Jazz share as a platform fee; Jazz-sourced / Jazz-internal campaigns (e.g. Jazz Cash) are revenue at the TonePerks share only. Free-of-charge campaigns carry no revenue. Accruals carry no sales tax (it arises on invoicing); the 'sales tax to charge' column shows what each invoice will add at {(d.settings.gstRate * 100).toFixed(0)}%.</p>
     </div>
   );
 }
@@ -111,5 +112,30 @@ function Campaigns({ d }: { d: any }) {
           <td className="num"><Money v={c.campaignValue} /></td><td className="num"><Money v={c.jazzShare} /></td><td className="num"><Money v={c.toneperksShare} /></td><td className="num font-medium"><Money v={c.revenue} /></td></tr>)}</tbody>
       </table></div>
     </Card>
+  );
+}
+
+function NotInvoiced({ d }: { d: any }) {
+  return (
+    <div className="space-y-6">
+      <Callout tone="warn" title="Revenue in Sales Flow Pro with no matching invoice">Each campaign-month was matched to the invoice register by customer, amount (±25%) and date (up to 5 months after the campaign month). Anything left here has either not been invoiced, was invoiced under a different customer name, or should not have been recorded as paid in Sales Flow Pro. Each one is cash you may be able to bill now.</Callout>
+      <Card pad={false} title="Not invoiced">
+        <div className="overflow-x-auto"><table className="tbl">
+          <thead><tr><th>Month</th><th>Code</th><th>Customer</th><th>Source</th><th>Status</th><th className="num">TonePerks revenue</th><th className="num">Jazz share</th><th className="num">Sales tax to charge</th></tr></thead>
+          <tbody>{d.notInvoiced.map((l: any) => <tr key={l.id}><td>{monthLabel(l.month)}</td><td className="text-xs text-muted-foreground">{l.code}</td><td className="font-medium">{l.client}</td><td><Badge tone={SRC[l.source].tone}>{SRC[l.source].label}</Badge></td><td className="text-xs">{l.status}</td><td className="num font-semibold"><Money v={l.revenue} /></td><td className="num"><Money v={l.platformFee || null} /></td><td className="num"><Money v={l.revenue * d.settings.gstRate} /></td></tr>)}
+            <tr className="total"><td colSpan={5}>Total</td><td className="num"><Money v={d.totals.notInvoiced} /></td><td className="num"><Money v={d.notInvoiced.reduce((a: number, l: any) => a + l.platformFee, 0)} /></td><td className="num"><Money v={d.totals.notInvoiced * d.settings.gstRate} /></td></tr></tbody>
+        </table></div>
+      </Card>
+      <div className="grid lg:grid-cols-2 gap-6">
+        <Card pad={false} title="Matched campaigns" subtitle="Campaign revenue vs the invoice it was matched to">
+          <div className="overflow-x-auto max-h-[480px]"><table className="tbl"><thead><tr><th>Month</th><th>Customer</th><th>Invoice</th><th className="num">SFP</th><th className="num">Invoiced</th><th className="num">Diff.</th></tr></thead>
+            <tbody>{d.matched.map((m: any) => <tr key={m.id}><td>{monthLabel(m.month)}</td><td>{m.client}</td><td className="text-xs">#{m.invoice ?? "–"} · {dmy(m.invoiceDate)}</td><td className="num"><Money v={m.revenue} /></td><td className="num"><Money v={m.invoiced} /></td><td className={`num ${Math.abs(m.difference) > 1000 ? "text-amber-600" : "text-muted-foreground"}`}><Money v={m.difference} /></td></tr>)}</tbody></table></div>
+        </Card>
+        <Card pad={false} title="Invoiced, but no campaign in Sales Flow Pro">
+          <table className="tbl"><thead><tr><th>Date</th><th>#</th><th>Customer</th><th className="num">Net</th></tr></thead>
+            <tbody>{d.invoicedNotInSfp.map((i: any) => <tr key={i.id}><td>{dmy(i.date)}</td><td className="text-xs">{i.number ?? "–"}</td><td>{i.client}</td><td className="num"><Money v={i.net} /></td></tr>)}</tbody></table>
+        </Card>
+      </div>
+    </div>
   );
 }
