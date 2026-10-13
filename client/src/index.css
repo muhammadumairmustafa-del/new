@@ -1,0 +1,55 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Tokens match the original CallPerks / TonePerks portal (light + dark). */
+:root {
+  --background: 0 0% 100%; --foreground: 0 0% 9%; --border: 0 0% 90%;
+  --card: 0 0% 98%; --card-foreground: 0 0% 9%; --card-border: 0 0% 94%;
+  --muted: 0 2% 94%; --muted-foreground: 0 2% 38%;
+  --primary: 210 85% 35%; --primary-foreground: 210 85% 98%;
+  --accent: 210 8% 92%; --accent-foreground: 210 8% 9%;
+  --destructive: 0 72% 40%; --destructive-foreground: 0 72% 98%;
+  --input: 0 0% 82%; --ring: 210 85% 35%;
+  --chart-grid: #e5e7eb; --chart-axis: #6b7280; --tooltip-bg: #ffffff;
+  color-scheme: light;
+}
+.dark {
+  --background: 0 0% 7%; --foreground: 0 0% 95%; --border: 0 0% 15%;
+  --card: 0 0% 9%; --card-foreground: 0 0% 95%; --card-border: 0 0% 12%;
+  --muted: 0 2% 14%; --muted-foreground: 0 2% 68%;
+  --primary: 210 85% 45%; --primary-foreground: 210 85% 98%;
+  --accent: 210 8% 17%; --accent-foreground: 210 8% 95%;
+  --destructive: 0 72% 45%; --destructive-foreground: 0 72% 98%;
+  --input: 0 0% 26%; --ring: 210 85% 50%;
+  --chart-grid: #27272a; --chart-axis: #a1a1aa; --tooltip-bg: #18181b;
+  color-scheme: dark;
+}
+
+@layer base {
+  * { @apply border-border; }
+  body { @apply bg-background text-foreground font-sans antialiased; }
+}
+
+@layer components {
+  .num { @apply tabular-nums text-right whitespace-nowrap; }
+  .tbl { @apply w-full text-sm; }
+  .tbl th { @apply text-left font-semibold text-muted-foreground text-[11px] uppercase tracking-wider px-3 py-2.5 border-b border-border bg-muted/60 sticky top-0; }
+  .tbl td { @apply px-3 py-2 border-b border-border/60; }
+  .tbl tbody tr:hover td { @apply bg-muted/40; }
+  .tbl tr.total td { @apply font-semibold border-t border-border bg-muted/50; }
+  .tbl tr.section td { @apply font-semibold text-foreground pt-4 bg-transparent; }
+  .input { @apply border border-input rounded-md px-2.5 py-1.5 text-sm bg-background text-foreground focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring; }
+  .label { @apply text-xs font-medium text-muted-foreground mb-1 block; }
+}
+
+/* Recharts in dark mode */
+.recharts-cartesian-grid line { stroke: var(--chart-grid); }
+.recharts-cartesian-axis-tick text { fill: var(--chart-axis); }
+.recharts-default-tooltip { background: var(--tooltip-bg) !important; border: 1px solid hsl(var(--border)) !important; border-radius: .5rem; }
+.recharts-legend-item-text { color: hsl(var(--muted-foreground)) !important; }
+
+@media print {
+  .no-print { display: none !important; }
+  body { background: white; color: black; }
+}

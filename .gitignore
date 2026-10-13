@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-server/
+.data/
+*.log
+.env
+# Never commit real accounting workbooks or exports
+*.xlsx
+*.xls
+*.csv
+uploads/
