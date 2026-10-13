@@ -11,12 +11,15 @@ export interface CashPlanSettings {
   partnerSalariesMonthly: number | null;
   includePartnerSalaries: boolean;
   defaultSurchargeRatePa: number;      // default surcharge on late tax (s.205) — verify
+  /** Count delivered-but-uninvoiced Sales Flow Pro campaigns as future collections (after invoicing). */
+  includeUninvoicedSfp: boolean;
+  invoiceLagDays: number;
   overrides: Record<string, { dueDate?: string; amount?: number; status?: string; note?: string }>;
 }
 export const DEFAULT_CASHPLAN: CashPlanSettings = {
   bankBalanceOverride: null, incomeTaxBasis: "recomputed", defaultCollectionDays: 90, withholdingOnCollectionPct: 7,
   jazzPaysAfterCollectionDays: 30, staffPayrollMonthly: null, partnerSalariesMonthly: null, includePartnerSalaries: true,
-  defaultSurchargeRatePa: 12, overrides: {},
+  defaultSurchargeRatePa: 12, includeUninvoicedSfp: true, invoiceLagDays: 7, overrides: {},
 };
 export interface TaxSettings {
   rules: TaxYearRules[];

@@ -4,6 +4,7 @@ import { liabilitySchedule } from "./reports.js";
 import { addDays, daysBetween, fiscalYearOf, monthEnd } from "../shared/fiscal.js";
 import { fromUnits } from "../shared/money.js";
 import { advanceTaxSchedule, partnerSalaries, taxPosition } from "./tax-position.js";
+import { loadSfpLines, reconcile } from "./sfp.js";
 import type { CashPlanSettings, TaxSettings } from "./settings.js";
 
 const pkr = (u: number) => Math.round(fromUnits(u));
@@ -94,6 +95,28 @@ export async function buildCashPlan(db: Db, s: Snapshot, cp: CashPlanSettings, t
       const cash = outstanding * (1 - cp.withholdingOnCollectionPct / 100) * p;
       collections.push({ date: exp, amount: Math.round(cash), client: inv.client, invoice: inv.number, probability: p });
       if (js > 0) jazzFuture.push({ date: addDays(exp, cp.jazzPaysAfterCollectionDays), amount: Math.round(js * (1 - collectedShare) * p), client: inv.client });
+    }
+  }
+  // Delivered campaigns in Sales Flow Pro that are not invoiced yet: invoice, then collect.
+  // Skipped when proposed SFP accruals are already in the ledger snapshot (they would then be in receivables).
+  const sfpAccrualsInLedger = s.lines.some((l) => l.source === "sfp-accrual");
+  if (cp.includeUninvoicedSfp && !sfpAccrualsInLedger) {
+    const { lines: sfpLines, settings: sfpSet } = await loadSfpLines(db);
+    if (sfpLines.length) {
+      const sales = new Map<string, number>();
+      for (const fy of [fiscalYearOf(asOf), fiscalYearOf(today)].filter((v, i, a) => a.indexOf(v) === i)) {
+        const rec = await reconcile(db, sfpLines, fy, sales, sfpSet.clientAliases ?? {}, today);
+        for (const l of rec.notInvoiced) {
+          const invoiceDate = addDays(today, cp.invoiceLagDays);
+          const exp = addDays(invoiceDate, cp.defaultCollectionDays);
+          const gross = l.revenue * (1 + sfpSet.gstRate);
+          collections.push({ date: exp, amount: Math.round(gross * (1 - cp.withholdingOnCollectionPct / 100)), client: `${l.client} (to invoice ${l.month})`, invoice: null, probability: 1 });
+          if (l.platformFee > 0) jazzFuture.push({ date: addDays(exp, cp.jazzPaysAfterCollectionDays), amount: Math.round(l.platformFee), client: `${l.client} (${l.month})` });
+          // the sales tax on these invoices is payable by the 15th of the month after invoicing
+          const stDue = fifteenthNext(invoiceDate);
+          items.push({ key: `sfp_st_${l.id}`, title: `Sales tax on new invoice: ${l.client} ${l.month}`, category: "statutory", amount: Math.round(l.revenue * sfpSet.gstRate), dueDate: stDue, priority: 1, overdueDays: 0, status: "open", basis: "Output tax on delivered campaign to be invoiced" });
+        }
+      }
     }
   }
   const jazzOnCollected = Math.max(0, Math.min(jazzBal, Math.round(jazzCollected)));
