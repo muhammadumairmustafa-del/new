@@ -152,6 +152,21 @@ CREATE TABLE IF NOT EXISTS sfp_payments (
   campaign_id TEXT NOT NULL,
   data JSONB NOT NULL
 );
+CREATE TABLE IF NOT EXISTS campaign_cash (
+  id SERIAL PRIMARY KEY,
+  campaign_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('received','paid')),
+  entry_date DATE NOT NULL,
+  amount NUMERIC(18,2) NOT NULL CHECK (amount > 0),
+  withheld NUMERIC(18,2) NOT NULL DEFAULT 0,
+  counterparty TEXT,
+  reference TEXT,
+  note TEXT,
+  created_by INTEGER REFERENCES users(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS campaign_cash_campaign_idx ON campaign_cash(campaign_id);
+ALTER TABLE campaign_cash ADD COLUMN IF NOT EXISTS withheld NUMERIC(18,2) NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS sfp_targets (
   id TEXT PRIMARY KEY,
   data JSONB NOT NULL

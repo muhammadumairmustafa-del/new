@@ -1,12 +1,12 @@
 import React, { useMemo, useState } from "react";
-import { RefreshCw, TrendingUp, Handshake, FileCheck2, AlertTriangle } from "lucide-react";
+import { RefreshCw, TrendingUp, Handshake, FileCheck2, AlertTriangle, FolderInput, FolderOutput, Trash2 } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, useApi, useMut, qs } from "../api";
 import { usePeriod } from "../App";
-import { Badge, Button, Callout, Card, Loading, Money, PageHeader, Stat, Tabs } from "../components/ui";
+import { Badge, Button, Callout, Card, Field, Loading, Modal, Money, PageHeader, Stat, Tabs } from "../components/ui";
 import { dmy, fyLabel, monthLabel, pkr } from "../format";
 
-type Tab = "monthly" | "uninvoiced" | "reconcile" | "campaigns";
+type Tab = "monthly" | "uninvoiced" | "reconcile" | "campaigns" | "cash";
 const SRC: Record<string, { label: string; color: string; tone: string }> = {
   callperks_sourced: { label: "TonePerks sourced", color: "hsl(160 75% 35%)", tone: "good" },
   jazz_sourced: { label: "Jazz sourced", color: "hsl(195 80% 40%)", tone: "info" },
@@ -52,11 +52,12 @@ export default function Revenue() {
         <Stat icon={Handshake} tone="warn" label="Jazz share per Sales Flow Pro" value={<Money v={t.sfpPlatformFee} compact />} sub={`In the register: ${pkr(t.invoicedJazz, { compact: true })}`} />
       </div>
       {d.unbookedMonths.length > 0 && <Callout tone="info" title="Months not yet in the books">{d.unbookedMonths.map(monthLabel).join(", ")} have campaign revenue in Sales Flow Pro but no accounts yet. Use <b>Propose accruals for uninvoiced</b> to see them in the statements as proposed entries until they are invoiced and the accountant's file arrives.</Callout>}
-      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ id: "monthly", label: "By month" }, { id: "uninvoiced", label: `Not invoiced (${d.notInvoiced.length})` }, { id: "reconcile", label: "Reconciliation by client" }, { id: "campaigns", label: "Campaigns" }]} />
+      <Tabs<Tab> value={tab} onChange={setTab} tabs={[{ id: "monthly", label: "By month" }, { id: "uninvoiced", label: `Not invoiced (${d.notInvoiced.length})` }, { id: "reconcile", label: "Reconciliation by client" }, { id: "cash", label: "Received & paid" }, { id: "campaigns", label: "All campaigns" }]} />
       {tab === "monthly" && <Monthly d={d} />}
       {tab === "uninvoiced" && <NotInvoiced d={d} />}
       {tab === "reconcile" && <Reconcile d={d} />}
       {tab === "campaigns" && <Campaigns d={d} />}
+      {tab === "cash" && <CampaignCash canEdit={role !== "viewer"} />}
       <p className="text-xs text-muted-foreground">Policy: TonePerks-sourced campaigns are revenue at full value with the Jazz share as a platform fee; Jazz-sourced / Jazz-internal campaigns (e.g. Jazz Cash) are revenue at the TonePerks share only. Free-of-charge campaigns carry no revenue. Accruals carry no sales tax (it arises on invoicing); the 'sales tax to charge' column shows what each invoice will add at {(d.settings.gstRate * 100).toFixed(0)}%.</p>
     </div>
   );
@@ -137,5 +138,89 @@ function NotInvoiced({ d }: { d: any }) {
         </Card>
       </div>
     </div>
+  );
+}
+
+type Folder = "received" | "paid";
+function CampaignCash({ canEdit }: { canEdit: boolean }) {
+  const q = useApi<any>("/campaign-cash");
+  const [folder, setFolder] = useState<Folder>("received");
+  const [add, setAdd] = useState<{ campaignId?: string } | null>(null);
+  const del = useMut((id: number) => api(`/campaign-cash/${id}`, { method: "DELETE" }));
+  if (!q.data) return <Loading q={q} />;
+  const { campaigns, entries } = q.data;
+  const name = new Map(campaigns.map((c: any) => [c.id, c]));
+  const tot = (k: string) => campaigns.reduce((a: number, c: any) => a + (c[k] || 0), 0);
+  const list = entries.filter((e: any) => e.kind === folder);
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <Stat icon={FolderInput} tone="good" label="Received (recorded)" value={<Money v={tot("received")} compact />} sub={`Still to collect ${pkr(tot("toCollect"), { compact: true })}`} onClick={() => setFolder("received")} />
+        <Stat icon={FolderOutput} tone="warn" label="Paid (recorded)" value={<Money v={tot("paid")} compact />} sub={`Jazz share still to pay ${pkr(tot("toPay"), { compact: true })}`} onClick={() => setFolder("paid")} />
+        <Stat label="TonePerks revenue (SFP)" value={<Money v={tot("revenue")} compact />} sub={`${campaigns.length} paid campaigns`} />
+        <Stat label="Jazz share on TonePerks-sourced" value={<Money v={tot("jazzShare")} compact />} />
+      </div>
+      <Callout tone="info">Record money as it actually moves: <b>Received</b> = cash from the customer (or from Jazz for Jazz-sourced and Jazz Cash campaigns, your share); <b>Paid</b> = Jazz's share or any other campaign cost you paid. These folders are a campaign-level tracker; the bank and the books stay the official record, and nothing is written back to Sales Flow Pro.</Callout>
+      <Card pad={false} title={<div className="flex items-center gap-1 -ml-1">
+          {(["received", "paid"] as Folder[]).map((f) => (
+            <button key={f} onClick={() => setFolder(f)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold ${folder === f ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
+              {f === "received" ? <FolderInput size={16} /> : <FolderOutput size={16} />}{f === "received" ? "Received" : "Paid"} <span className="text-xs font-normal">({entries.filter((e: any) => e.kind === f).length})</span>
+            </button>))}
+        </div>} actions={canEdit && <Button onClick={() => setAdd({})}>{folder === "received" ? "Add amount received" : "Add amount paid"}</Button>}>
+        {list.length === 0 ? <div className="px-5 py-8 text-sm text-muted-foreground text-center">Nothing in this folder yet.</div> : (
+          <div className="overflow-x-auto"><table className="tbl">
+            <thead><tr><th>Date</th><th>Campaign</th><th>{folder === "received" ? "From" : "To"}</th><th>Reference</th><th>Note</th>{folder === "received" && <th className="num">Tax withheld</th>}<th className="num">Amount</th><th></th></tr></thead>
+            <tbody>{list.map((e: any) => { const c: any = name.get(e.campaign_id); return (
+              <tr key={e.id}><td className="whitespace-nowrap">{dmy(e.entry_date)}</td><td className="font-medium">{c ? `${c.client}` : e.campaign_id}<span className="text-xs text-muted-foreground"> {c?.code}</span></td>
+                <td>{e.counterparty ?? "–"}</td><td className="text-xs">{e.reference ?? "–"}</td><td className="text-xs text-muted-foreground max-w-xs truncate" title={e.note ?? ""}>{e.note ?? ""}</td>
+                {folder === "received" && <td className="num"><Money v={e.withheld || null} /></td>}
+                <td className="num font-semibold"><Money v={e.amount} /></td>
+                <td>{canEdit && <button className="text-muted-foreground hover:text-rose-600" onClick={() => confirm("Delete this entry?") && del.mutate(e.id)}><Trash2 size={14} /></button>}</td></tr>); })}
+              <tr className="total"><td colSpan={5}>Total</td>{folder === "received" && <td className="num"><Money v={list.reduce((a: number, e: any) => a + e.withheld, 0)} /></td>}<td className="num"><Money v={list.reduce((a: number, e: any) => a + e.amount, 0)} /></td><td></td></tr></tbody>
+          </table></div>)}
+      </Card>
+      <Card pad={false} title="By campaign" subtitle={`Invoice total = TonePerks revenue + ${(q.data.gstRate * 100).toFixed(0)}% sales tax; collected = cash received + income tax withheld by the customer (claimable)`}>
+        <div className="overflow-x-auto"><table className="tbl">
+          <thead><tr><th>Period</th><th>Code</th><th>Customer</th><th>Source</th><th className="num">TonePerks revenue</th><th className="num">Invoice incl. tax</th><th className="num">Received + withheld</th><th className="num">To collect</th><th className="num">Jazz share</th><th className="num">Paid</th><th className="num">To pay</th><th></th></tr></thead>
+          <tbody>{campaigns.map((c: any) => (
+            <tr key={c.id}><td className="whitespace-nowrap text-xs">{c.firstMonth === c.lastMonth ? monthLabel(c.firstMonth) : `${monthLabel(c.firstMonth)} – ${monthLabel(c.lastMonth)}`}</td><td className="text-xs text-muted-foreground">{c.code}</td><td className="font-medium">{c.client}</td>
+              <td><Badge tone={SRC[c.source].tone}>{SRC[c.source].label}</Badge></td>
+              <td className="num"><Money v={c.revenue} /></td><td className="num"><Money v={c.invoiceTotal} /></td><td className="num text-emerald-700 dark:text-emerald-400"><Money v={c.received + c.withheld || null} /></td>
+              <td className={`num font-semibold ${c.toCollect > 1 ? "text-amber-600" : "text-emerald-600"}`}>{c.toCollect > 1 ? <Money v={c.toCollect} /> : "✓"}</td>
+              <td className="num"><Money v={c.jazzShare || null} /></td><td className="num"><Money v={c.paid || null} /></td>
+              <td className={`num ${c.toPay > 1 ? "text-amber-600 font-semibold" : "text-muted-foreground"}`}>{c.jazzShare ? (c.toPay > 1 ? <Money v={c.toPay} /> : "✓") : "–"}</td>
+              <td className="whitespace-nowrap">{canEdit && <><Button size="sm" variant="ghost" onClick={() => { setFolder("received"); setAdd({ campaignId: c.id }); }}>+ Received</Button><Button size="sm" variant="ghost" onClick={() => { setFolder("paid"); setAdd({ campaignId: c.id }); }}>+ Paid</Button></>}</td></tr>))}
+            <tr className="total"><td colSpan={4}>Total</td><td className="num"><Money v={tot("revenue")} /></td><td className="num"><Money v={tot("invoiceTotal")} /></td><td className="num"><Money v={tot("received") + tot("withheld")} /></td><td className="num"><Money v={tot("toCollect")} /></td><td className="num"><Money v={tot("jazzShare")} /></td><td className="num"><Money v={tot("paid")} /></td><td className="num"><Money v={tot("toPay")} /></td><td></td></tr></tbody>
+        </table></div>
+      </Card>
+      {add && <AddCash folder={folder} campaigns={campaigns} campaignId={add.campaignId} onClose={() => setAdd(null)} />}
+    </div>
+  );
+}
+
+function AddCash({ folder, campaigns, campaignId, onClose }: { folder: Folder; campaigns: any[]; campaignId?: string; onClose: () => void }) {
+  const [f, setF] = useState({ campaignId: campaignId ?? "", date: new Date().toISOString().slice(0, 10), amount: "", withheld: "", counterparty: folder === "paid" ? "Jazz (PMCL)" : "", reference: "", note: "" });
+  const [err, setErr] = useState<string | null>(null);
+  const m = useMut((b: any) => api("/campaign-cash", { body: b }));
+  const c = campaigns.find((x) => x.id === f.campaignId);
+  const suggested = c ? (folder === "received" ? c.toCollect : c.toPay) : 0;
+  return (
+    <Modal title={folder === "received" ? "Add amount received" : "Add amount paid"} onClose={onClose}>
+      <div className="space-y-3">
+        <Field label="Campaign"><select className="input w-full" value={f.campaignId} onChange={(e) => setF({ ...f, campaignId: e.target.value })}>
+          <option value="">Select a campaign…</option>{campaigns.map((x) => <option key={x.id} value={x.id}>{x.client} · {x.code ?? ""} · {monthLabel(x.firstMonth)}</option>)}</select></Field>
+        {c && suggested > 1 && <p className="text-xs text-muted-foreground">Outstanding {folder === "received" ? "to collect (incl. sales tax)" : "to pay Jazz"}: PKR {pkr(suggested)} <button className="underline" onClick={() => setF({ ...f, amount: String(Math.round(suggested)) })}>use this</button></p>}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Date"><input type="date" className="input w-full" value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
+          <Field label={folder === "received" ? "Cash received (PKR)" : "Amount paid (PKR)"}><input className="input w-full" inputMode="numeric" value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} /></Field>
+        </div>
+        {folder === "received" && <Field label="Income / sales tax withheld by the customer (PKR, optional)"><input className="input w-full" inputMode="numeric" value={f.withheld} onChange={(e) => setF({ ...f, withheld: e.target.value })} /></Field>}
+        <Field label={folder === "received" ? "Received from" : "Paid to"}><input className="input w-full" value={f.counterparty} onChange={(e) => setF({ ...f, counterparty: e.target.value })} /></Field>
+        <Field label="Reference (cheque / transfer / CPR no.)"><input className="input w-full" value={f.reference} onChange={(e) => setF({ ...f, reference: e.target.value })} /></Field>
+        <Field label="Note"><input className="input w-full" value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
+        {err && <Callout tone="bad">{err}</Callout>}
+        <div className="flex justify-end"><Button disabled={!f.campaignId || !f.amount} onClick={() => m.mutate({ campaignId: f.campaignId, kind: folder, date: f.date, amount: Number(f.amount.replace(/,/g, "")), withheld: Number((f.withheld || "0").replace(/,/g, "")) || 0, counterparty: f.counterparty || null, reference: f.reference || null, note: f.note || null }, { onSuccess: onClose, onError: (e: any) => setErr(e.message) })}>Save</Button></div>
+      </div>
+    </Modal>
   );
 }

@@ -419,6 +419,44 @@ export function apiRouter(db: Db) {
     await log(req, "sfp.accruals", { ...r2, fys: b.fys }); res.json(r2);
   }));
 
+  // ------------------------------------------------------------------ campaign cash folders (received / paid)
+  r.get("/campaign-cash", wrap(async (_req, res) => {
+    const rows = await db.query<any>("SELECT c.*, u.full_name AS created_by_name FROM campaign_cash c LEFT JOIN users u ON u.id = c.created_by ORDER BY c.entry_date DESC, c.id DESC");
+    const { lines, settings: sfpSet } = await loadSfpLines(db);
+    // One row per campaign (retainer months roll up to their campaign).
+    const camp = new Map<string, any>();
+    const thisMonth = today(_req).slice(0, 7);
+    for (const l of lines) {
+      if (l.month > thisMonth) continue; // future retainer months are not yet due
+      const id = l.id.split(":")[0];
+      const c = camp.get(id) ?? { id, code: l.code, client: l.client, source: l.source, status: l.status, firstMonth: l.month, lastMonth: l.month, campaignValue: 0, revenue: 0, jazzShare: 0, toneperksShare: 0, received: 0, withheld: 0, paid: 0 };
+      c.campaignValue += l.campaignValue; c.revenue += l.revenue; c.jazzShare += l.source === "callperks_sourced" ? l.platformFee : 0; c.toneperksShare += l.toneperksShare;
+      if (l.month < c.firstMonth) c.firstMonth = l.month; if (l.month > c.lastMonth) c.lastMonth = l.month;
+      camp.set(id, c);
+    }
+    for (const e of rows) { const c = camp.get(e.campaign_id); if (c) { c[e.kind] += Number(e.amount); if (e.kind === "received") c.withheld += Number(e.withheld || 0); } }
+    res.json({
+      gstRate: sfpSet.gstRate,
+      entries: rows.map((e) => ({ ...e, entry_date: isoDate(e.entry_date), amount: Number(e.amount), withheld: Number(e.withheld || 0) })),
+      campaigns: [...camp.values()].filter((c) => c.revenue > 0 || c.received > 0 || c.paid > 0)
+        .map((c) => { const invoiceTotal = c.revenue * (1 + sfpSet.gstRate); return { ...c, invoiceTotal, toCollect: invoiceTotal - c.received - c.withheld, toPay: c.jazzShare - c.paid }; })
+        .sort((a, b) => (a.lastMonth < b.lastMonth ? 1 : -1)),
+    });
+  }));
+  r.post("/campaign-cash", requireRole("accountant"), wrap(async (req, res) => {
+    const b = z.object({ campaignId: z.string().min(1).max(80), kind: z.enum(["received", "paid"]), date: zDate, amount: z.number().positive(), withheld: z.number().min(0).default(0),
+      counterparty: z.string().max(120).optional().nullable(), reference: z.string().max(120).optional().nullable(), note: z.string().max(500).optional().nullable() }).parse(req.body);
+    const [{ n }] = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM sfp_campaigns WHERE id = $1", [b.campaignId]);
+    if (n === "0") return res.status(400).json({ error: "Unknown campaign — sync Sales Flow Pro first" });
+    await db.query("INSERT INTO campaign_cash (campaign_id, kind, entry_date, amount, withheld, counterparty, reference, note, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      [b.campaignId, b.kind, b.date, b.amount, b.kind === "received" ? b.withheld : 0, b.counterparty ?? null, b.reference ?? null, b.note ?? null, req.user!.id]);
+    await log(req, "campaign_cash.add", b); res.json({ ok: true });
+  }));
+  r.delete("/campaign-cash/:id", requireRole("accountant"), wrap(async (req, res) => {
+    await db.query("DELETE FROM campaign_cash WHERE id = $1", [Number(req.params.id)]);
+    await log(req, "campaign_cash.delete", { id: Number(req.params.id) }); res.json({ ok: true });
+  }));
+
   // ------------------------------------------------------------------ partners & settings
   r.patch("/partners/:id", requireRole("partner"), wrap(async (req, res) => {
     const b = z.object({ ratio: z.number().min(0).max(1).optional(), committed_capital: z.number().min(0).optional(), aka: z.string().nullable().optional() }).parse(req.body);
