@@ -29,7 +29,7 @@ export async function buildCashPlan(db: Db, s: Snapshot, cp: CashPlanSettings, t
   const curTY = fiscalYearOf(asOf);
   const prevTY = curTY - 1;
   const prev = taxPosition(s, tax, prevTY, asOf);
-  const liabBooked = prev.bookedLiabilityAsOf;
+  const liabBooked = Math.max(0, Math.round(prev.bookedTaxExpense - prev.taxPaidSinceYearStart)); // prior-year tax only
   const whtAvail = (() => { const a = roleAccount(s, "wht_receivable"); return a ? pkr(b.get(a.id) ?? 0) : 0; })();
   if (liabBooked > 0 || prev.computation.totalTax > 0) {
     const gross = cp.incomeTaxBasis === "recomputed" ? Math.max(liabBooked, Math.round(prev.computation.totalTax)) : liabBooked;
@@ -41,7 +41,7 @@ export async function buildCashPlan(db: Db, s: Snapshot, cp: CashPlanSettings, t
       penaltyNote: od(due) ? `Default surcharge ~${cp.defaultSurchargeRatePa}% p.a. accrues ≈ PKR ${Math.round(Math.max(0, gross - whtPrevYear) * cp.defaultSurchargeRatePa / 100 / 365).toLocaleString()} per day` : undefined });
   }
   // --- Advance tax current year (s.147)
-  const latestTax = cp.incomeTaxBasis === "recomputed" ? Math.max(liabBooked, Math.round(prev.computation.totalTax)) : liabBooked;
+  const latestTax = cp.incomeTaxBasis === "recomputed" ? Math.max(prev.bookedTaxExpense, Math.round(prev.computation.totalTax)) : prev.bookedTaxExpense;
   const adv = advanceTaxSchedule(s, tax, curTY, latestTax, asOf);
   for (const q of adv.quarters) {
     if (!q.complete && q.dueDate > addDays(today, 7 * opts.weeks)) continue;
@@ -99,6 +99,12 @@ export async function buildCashPlan(db: Db, s: Snapshot, cp: CashPlanSettings, t
   const jazzOnCollected = Math.max(0, Math.min(jazzBal, Math.round(jazzCollected)));
   if (jazzOnCollected > 0) items.push({ key: "jazz_collected", title: "Jazz platform share on invoices already collected", category: "jazz", amount: jazzOnCollected,
     dueDate: today, priority: 2, overdueDays: 0, status: "open", basis: `Share of Jazz payable (${jazzBal.toLocaleString()}) relating to cash already received from customers` });
+  // Jazz payable in the ledger that the invoice register does not explain (e.g. adjusting entries for
+  // invoices booked without a Jazz share) relates to past, collected sales: treat as due now.
+  const explained = Math.round(jazzCollected + jazzFuture.reduce((a, j) => a + j.amount, 0));
+  const unexplained = jazzBal - explained;
+  if (unexplained > 1000) items.push({ key: "jazz_unregistered", title: "Jazz share booked in the ledger but not in the invoice register", category: "jazz", amount: unexplained,
+    dueDate: today, priority: 2, overdueDays: 0, status: "open", basis: `Ledger Jazz payable ${jazzBal.toLocaleString()} less ${explained.toLocaleString()} traceable to registered invoices` });
   for (const j of jazzFuture) if (j.amount > 0) items.push({ key: `jazz_${j.client}_${j.date}`, title: `Jazz share — ${j.client} (after collection)`, category: "jazz", amount: j.amount,
     dueDate: j.date, priority: 3, overdueDays: 0, status: "open", basis: `${cp.jazzPaysAfterCollectionDays} days after expected customer receipt` });
   // --- Payroll run-rate

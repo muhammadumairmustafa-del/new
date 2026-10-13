@@ -275,7 +275,7 @@ export function apiRouter(db: Db) {
     const ty = Number(req.query.ty) || fiscalYearOf(asOf);
     const pos = taxPosition(s, settings, ty, asOf);
     const prev = taxPosition(s, settings, ty - 1, asOf);
-    const latest = Math.max(prev.bookedLiabilityAsOf, Math.round(prev.computation.totalTax));
+    const latest = Math.max(prev.bookedTaxExpense, Math.round(prev.computation.totalTax));
     res.json({ asOf, settings, position: pos, previous: prev, advanceTax: advanceTaxSchedule(s, settings, ty, latest, asOf), liabilities: (liabilitySchedule(s, asOf) as any[]).filter((l) => /tax/i.test(l.fsLine)) });
   }));
 

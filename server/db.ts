@@ -45,7 +45,19 @@ export async function openDb(opts: { url?: string; dataDir?: string; memory?: bo
   } else {
     const { PGlite, types } = await import("@electric-sql/pglite");
     const dir = opts.memory ? undefined : (opts.dataDir ?? path.resolve(".data/pglite"));
-    if (dir) fs.mkdirSync(dir, { recursive: true });
+    if (dir) {
+      fs.mkdirSync(dir, { recursive: true });
+      // The embedded database is single-process: refuse to open it twice (that corrupts it).
+      const lock = path.join(dir, "..", `${path.basename(dir)}.lock`);
+      if (fs.existsSync(lock)) {
+        const pid = Number(fs.readFileSync(lock, "utf8"));
+        let alive = false; try { if (pid) { process.kill(pid, 0); alive = true; } } catch { /* not running */ }
+        if (alive && pid !== process.pid) throw new Error(`Embedded database ${dir} is already in use by process ${pid}. Stop it first, or set DATABASE_URL.`);
+      }
+      fs.writeFileSync(lock, String(process.pid));
+      const release = () => { try { if (fs.readFileSync(lock, "utf8") === String(process.pid)) fs.unlinkSync(lock); } catch { /* ignore */ } };
+      process.once("exit", release);
+    }
     const lite = new PGlite(dir, {
       parsers: { [types.NUMERIC]: (v: string) => v, [types.DATE]: (v: string) => v },
     });

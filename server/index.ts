@@ -37,4 +37,9 @@ if (clientDist) {
   app.use(express.static(clientDist, { index: false, maxAge: "1h" }));
   app.get("*", (_req, res) => res.sendFile(path.join(clientDist, "index.html")));
 }
-app.listen(port, "0.0.0.0", () => console.log(`TonePerks finance API on :${port}${clientDist ? " (serving client)" : ""} · db: ${process.env.DATABASE_URL ? "postgres" : "embedded (./.data)"}`));
+const server = app.listen(port, "0.0.0.0", () => console.log(`TonePerks finance API on :${port}${clientDist ? " (serving client)" : ""} · db: ${process.env.DATABASE_URL ? "postgres" : "embedded (./.data)"}`));
+
+// Close the database cleanly so the embedded store is never left half-written.
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.once(sig, () => { server.close(); db.close().finally(() => process.exit(0)); });
+}

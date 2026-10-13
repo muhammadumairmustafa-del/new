@@ -24,12 +24,13 @@ export async function runChecks(db: Db, s: Snapshot, tax: TaxSettings, asOf: str
 
   // C01/C02 prior-year income tax
   const prev = taxPosition(s, tax, prevTY, asOf);
-  const itLiab = bal("income_tax_payable", -1);
-  if (itLiab > 0) {
+  const itLiab = bal("income_tax_payable", -1); // all years
+  const priorLiab = Math.max(0, Math.round(prev.bookedTaxExpense - prev.taxPaidSinceYearStart));
+  if (priorLiab > 0) {
     const late = daysBetween(prev.rules.returnDueDate, today);
-    add({ code: "TAX-01", area: "Income tax", severity: late > 0 ? "critical" : "high", status: "fail", amount: itLiab,
-      title: `Income tax for TY${prevTY} unpaid${late > 0 ? ` — ${late} days past the ${prev.rules.returnDueDate} due date` : ""}`,
-      detail: `The ledger carries an income tax liability of ${f(itLiab)} with no payment recorded. Withholding tax receivable of ${f(bal("wht_receivable"))} has not been adjusted against it.`,
+    add({ code: "TAX-01", area: "Income tax", severity: late > 0 ? "critical" : "high", status: "fail", amount: priorLiab,
+      title: `Income tax for TY${prevTY} (${f(priorLiab)}) unpaid${late > 0 ? ` — ${late} days past the ${prev.rules.returnDueDate} due date` : ""}`,
+      detail: `TY${prevTY} tax booked ${f(prev.bookedTaxExpense)} with no payment recorded (total income tax liability in the ledger: ${f(itLiab)}). Withholding tax receivable of ${f(bal("wht_receivable"))} has not been adjusted against it.`,
       recommendation: "Confirm whether the TY return was filed or extended; adjust WHT certificates against the liability; agree a payment plan (instalments can be requested from the Commissioner) to stop default surcharge accruing." });
   }
   if (prev.period.complete && prev.understatement && Math.abs(prev.understatement) > 100000) {
@@ -39,7 +40,7 @@ export async function runChecks(db: Db, s: Snapshot, tax: TaxSettings, asOf: str
       recommendation: "Have the tax adviser confirm the applicable AOP rates and surcharge for this tax year and correct the provision before the return is finalised." });
   }
   // TAX-03 advance tax
-  const adv = advanceTaxSchedule(s, tax, curTY, Math.max(itLiab, Math.round(prev.computation.totalTax)), asOf);
+  const adv = advanceTaxSchedule(s, tax, curTY, Math.max(prev.bookedTaxExpense, Math.round(prev.computation.totalTax)), asOf);
   const missed = adv.quarters.filter((q) => q.complete && q.dueDate < today && q.instalment > 0);
   if (missed.length) {
     const amt = missed.reduce((a, q) => a + q.instalment, 0);
@@ -83,6 +84,27 @@ export async function runChecks(db: Db, s: Snapshot, tax: TaxSettings, asOf: str
       title: `Jazz platform share ${f(jazz.balance)} outstanding${paid ? "" : " — never paid"}; oldest from ${jazz.oldestUnpaidSince}`,
       detail: "The 40% Jazz share is accrued on every non-Jazz-Cash invoice but no settlement, statement or reconciliation with Jazz is recorded. Terms (pay-on-collection vs pay-on-invoice) and whether Jazz will charge sales tax on its share are undocumented.",
       recommendation: "Obtain the Jazz revenue-share agreement and a statement from Jazz; reconcile invoice-by-invoice; agree that the share is payable only on collection." });
+  }
+  // JAZZ-02 invoices without the Jazz revenue share (policy: share applies to all campaigns except exempt clients)
+  const company = await db.query<{ value: any }>("SELECT value FROM settings WHERE key = 'company'");
+  const cv = company[0] ? (typeof company[0].value === "string" ? JSON.parse(company[0].value) : company[0].value) : {};
+  const sharePct: number = cv.jazzSharePct ?? 0.4;
+  const exempt: string[] = (cv.jazzExemptClients ?? ["Jazz Cash"]).map((x: string) => x.toLowerCase());
+  const noShare = (await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled' AND jazz_share = 0 AND net_amount > 0"))
+    .filter((i) => !exempt.includes(String(i.client).toLowerCase()));
+  const regJazz = (await db.query<any>("SELECT coalesce(sum(jazz_share),0)::text AS t FROM invoices WHERE coalesce(status,'') <> 'cancelled'"))[0].t;
+  let ledgerFee = 0; for (const l of s.lines) if (l.account.system_role === "platform_fee" && l.date <= asOf) ledgerFee += l.dr - l.cr;
+  const covered = pkr(ledgerFee) - Math.round(Number(regJazz));
+  if (noShare.length) {
+    const due = Math.round(noShare.reduce((a, i) => a + Number(i.net_amount) * sharePct, 0));
+    if (covered >= due - 1000) add({ code: "JAZZ-02", area: "Cost of sales", severity: "low", status: "pass", amount: due,
+      title: `Jazz share on ${noShare.length} invoices without a register share is covered by ledger adjustments (${f(covered)})`,
+      detail: "The invoice register still shows zero Jazz share on these invoices; update the register at source.", recommendation: "Ask the accountant to correct the register." });
+    else
+    add({ code: "JAZZ-02", area: "Cost of sales", severity: "high", status: "fail", amount: due - Math.max(0, covered),
+      title: `${noShare.length} invoices carry no Jazz ${Math.round(sharePct * 100)}% share (${f(due)} of cost may be missing)`,
+      detail: noShare.map((i) => `${i.client} ${isoDate(i.invoice_date)}: ${f(Math.round(Number(i.net_amount)))}`).join("; ") + ". Check the ledger for adjusting entries before acting.",
+      recommendation: "Book the platform fee and payable to Jazz for each invoice (or record why the campaign is exempt in Settings → company)." });
   }
   // AR checks from the register
   const inv = await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled'");
