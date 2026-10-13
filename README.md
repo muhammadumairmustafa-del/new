@@ -34,6 +34,15 @@ npm run build && npm start   # single server on $PORT (default 5000)
 - **First visit:** you create the partner (admin) account. Then go to **Import accounts** and upload the FY2026 year-end workbook first, then the FY2027 period workbooks in date order.
 - **Tests:** `npm test` runs on synthetic data only.
 
+### Deploying on Vercel
+
+The repo is Vercel-ready (`vercel.json`, `api/index.ts`):
+
+1. Import the GitHub repo in Vercel (framework: Other).
+2. **Storage → Neon (Postgres)**: connect it to the project. This sets `DATABASE_URL`. Serverless functions cannot use the embedded database.
+3. Environment variables: `SETUP_TOKEN` (a long random code; it is required to create the first admin account on a public URL) and optionally `SFP_DATABASE_URL` (a read-only Sales Flow Pro user).
+4. Deploy, open the site, and create the partner account using the setup code.
+
 ### Deploying on Replit
 
 Import the GitHub repo, add a PostgreSQL database (which sets `DATABASE_URL`), set the run command to `npm run build && npm start`, and deploy.

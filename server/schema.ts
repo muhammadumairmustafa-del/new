@@ -1,4 +1,5 @@
-CREATE TABLE IF NOT EXISTS users (
+/** Database schema, applied idempotently at start-up (embedded so serverless bundles need no file access). */
+export const SCHEMA_SQL = `CREATE TABLE IF NOT EXISTS users (
   id SERIAL PRIMARY KEY,
   username TEXT UNIQUE NOT NULL,
   full_name TEXT NOT NULL,
@@ -155,3 +156,4 @@ CREATE TABLE IF NOT EXISTS sfp_targets (
   id TEXT PRIMARY KEY,
   data JSONB NOT NULL
 )
+`;

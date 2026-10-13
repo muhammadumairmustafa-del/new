@@ -1,4 +1,5 @@
 import express, { type Request, type Response, type NextFunction } from "express";
+import crypto from "node:crypto";
 import multer from "multer";
 import { z } from "zod";
 import type { Db } from "./db.js";
@@ -19,6 +20,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 
 const dateRe = /^\d{4}-\d{2}-\d{2}$/;
 const zDate = z.string().regex(dateRe);
 const wrap = (fn: (req: Request, res: Response) => Promise<unknown>) => (req: Request, res: Response, next: NextFunction) => fn(req, res).catch(next);
+const safeEqual = (a: string, b: string) => { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && crypto.timingSafeEqual(x, y); };
 export const todayPk = () => new Date(Date.now() + 5 * 3600000).toISOString().slice(0, 10);
 
 export function apiRouter(db: Db) {
@@ -39,10 +41,14 @@ export function apiRouter(db: Db) {
   // ------------------------------------------------------------------ auth
   r.get("/auth/status", wrap(async (req, res) => {
     const [{ n }] = await db.query<{ n: string }>("SELECT count(*)::text AS n FROM users");
-    res.json({ needsSetup: n === "0", user: req.user ?? null });
+    res.json({ needsSetup: n === "0", setupTokenRequired: !!process.env.SETUP_TOKEN || !!process.env.VERCEL, user: req.user ?? null });
   }));
   r.post("/auth/setup", wrap(async (req, res) => {
-    const body = z.object({ username: z.string().min(3).max(40).regex(/^[a-z0-9._-]+$/i), fullName: z.string().min(2).max(80), password: z.string() }).parse(req.body);
+    const body = z.object({ username: z.string().min(3).max(40).regex(/^[a-z0-9._-]+$/i), fullName: z.string().min(2).max(80), password: z.string(), setupToken: z.string().optional() }).parse(req.body);
+    // On a public deployment the first visitor must not be able to claim the admin account.
+    const expected = process.env.SETUP_TOKEN;
+    if (process.env.VERCEL && !expected) return res.status(403).json({ error: "Set the SETUP_TOKEN environment variable in Vercel, redeploy, then enter it here." });
+    if (expected && !safeEqual(body.setupToken ?? "", expected)) return res.status(403).json({ error: "Invalid setup code" });
     const p = passwordProblem(body.password); if (p) return res.status(400).json({ error: p });
     const created = await db.tx(async (q) => {
       const [{ n }] = await q<{ n: string }>("SELECT count(*)::text AS n FROM users");

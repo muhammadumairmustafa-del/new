@@ -2,13 +2,14 @@ import React, { useState } from "react";
 import { api } from "../api";
 import { Button, Callout, Field } from "../components/ui";
 
-export default function Login({ needsSetup }: { needsSetup: boolean }) {
+export default function Login({ needsSetup, tokenRequired }: { needsSetup: boolean; tokenRequired?: boolean }) {
+  const [setupToken, setToken] = useState("");
   const [username, setU] = useState(""); const [password, setP] = useState(""); const [fullName, setN] = useState("");
   const [err, setErr] = useState<string | null>(null); const [busy, setBusy] = useState(false);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault(); setBusy(true); setErr(null);
     try {
-      await api(needsSetup ? "/auth/setup" : "/auth/login", { body: needsSetup ? { username, password, fullName } : { username, password } });
+      await api(needsSetup ? "/auth/setup" : "/auth/login", { body: needsSetup ? { username, password, fullName, setupToken } : { username, password } });
       location.reload();
     } catch (x: any) { setErr(x.message); } finally { setBusy(false); }
   };
@@ -19,6 +20,7 @@ export default function Login({ needsSetup }: { needsSetup: boolean }) {
           <h1 className="text-xl font-semibold">TonePerks Finance</h1>
           <p className="text-sm text-muted-foreground">{needsSetup ? "First-time setup: create the partner (administrator) account." : "Sign in to continue."}</p>
         </div>
+        {needsSetup && tokenRequired && <Field label="Setup code (from the SETUP_TOKEN setting)"><input className="input w-full" value={setupToken} onChange={(e) => setToken(e.target.value)} required /></Field>}
         {needsSetup && <Field label="Full name"><input className="input w-full" value={fullName} onChange={(e) => setN(e.target.value)} required /></Field>}
         <Field label="Username"><input className="input w-full" autoComplete="username" value={username} onChange={(e) => setU(e.target.value)} required /></Field>
         <Field label="Password"><input className="input w-full" type="password" autoComplete={needsSetup ? "new-password" : "current-password"} value={password} onChange={(e) => setP(e.target.value)} required /></Field>

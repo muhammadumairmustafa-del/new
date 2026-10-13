@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { SCHEMA_SQL } from "./schema.js";
 
 /**
  * Minimal database adapter. Uses PostgreSQL when DATABASE_URL is set
@@ -13,13 +13,7 @@ export interface Db {
   close(): Promise<void>;
 }
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-
-function schemaSql(): string {
-  const candidates = [path.join(here, "schema.sql"), path.join(here, "../../server/schema.sql")];
-  for (const c of candidates) if (fs.existsSync(c)) return fs.readFileSync(c, "utf8");
-  throw new Error("schema.sql not found");
-}
+function schemaSql(): string { return SCHEMA_SQL; }
 
 export async function openDb(opts: { url?: string; dataDir?: string; memory?: boolean } = {}): Promise<Db> {
   const url = opts.url ?? process.env.DATABASE_URL;
@@ -28,7 +22,7 @@ export async function openDb(opts: { url?: string; dataDir?: string; memory?: bo
     const pg = (await import("pg")).default;
     pg.types.setTypeParser(1700, (v: string) => v); // numeric stays a string; converted explicitly
     pg.types.setTypeParser(1082, (v: string) => v); // date stays YYYY-MM-DD
-    const pool = new pg.Pool({ connectionString: url, max: 5 });
+    const pool = new pg.Pool({ connectionString: url, max: process.env.VERCEL ? 2 : 5, ssl: /sslmode=disable|localhost|127\.0\.0\.1/.test(url) ? undefined : { rejectUnauthorized: false } });
     db = {
       async query(sql, params = []) { return (await pool.query(sql, params as any[])).rows; },
       async tx(fn) {
@@ -43,6 +37,7 @@ export async function openDb(opts: { url?: string; dataDir?: string; memory?: bo
       close: () => pool.end(),
     };
   } else {
+    if (process.env.VERCEL) throw new Error("DATABASE_URL is not set. Connect a Postgres database (Vercel → Storage → Neon) and redeploy.");
     const { PGlite, types } = await import("@electric-sql/pglite");
     const dir = opts.memory ? undefined : (opts.dataDir ?? path.resolve(".data/pglite"));
     if (dir) {

@@ -39,9 +39,10 @@ function readLS(k: string) { try { return localStorage.getItem(k); } catch { ret
 function writeLS(k: string, v: string) { try { localStorage.setItem(k, v); } catch { /* ignore */ } }
 
 export default function App() {
-  const status = useApi<{ needsSetup: boolean; user: any }>("/auth/status");
+  const status = useApi<{ needsSetup: boolean; setupTokenRequired?: boolean; user: any }>("/auth/status");
   if (status.isLoading) return <div className="p-10 text-slate-500">Loading…</div>;
-  if (!status.data?.user) return <Login needsSetup={!!status.data?.needsSetup} />;
+  if (status.error) return <div className="min-h-screen grid place-items-center p-6"><div className="max-w-md text-sm border border-rose-200 bg-rose-50 text-rose-900 rounded-lg p-4"><b>The server is not ready.</b><div className="mt-1">{String((status.error as Error).message)}</div></div></div>;
+  if (!status.data?.user) return <Login needsSetup={!!status.data?.needsSetup} tokenRequired={!!status.data?.setupTokenRequired} />;
   return <Shell user={status.data.user} />;
 }
 
