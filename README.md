@@ -36,6 +36,9 @@ npm run build && npm start   # single server on $PORT (default 5000)
 
 ### Deploying on Vercel
 
+Production: https://toneperks-finance.vercel.app — every push to `main` deploys automatically; other branches get preview deployments.
+
+
 The repo is Vercel-ready (`vercel.json`, `api/index.ts`):
 
 1. Import the GitHub repo in Vercel (framework: Other).
