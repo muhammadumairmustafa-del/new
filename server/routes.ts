@@ -550,7 +550,7 @@ export function apiRouter(db: Db) {
         const served = ls.length ? ls.map((l) => monthEnd(l.month)).sort().at(-1)! : d.docDate!;
         await postEntry(q, { date: served < d.docDate! ? served : d.docDate!, ref: `INV-${d.docNo ?? d.id}`, memo: `Invoice issued but not in the books: #${d.docNo ?? "–"} ${d.client} (${d.campaignPeriod ?? ""})`, source: "doc-invoice", kind: "proposed", userId: req.user!.id, lines: jl });
         for (const l of ls) {
-          const r2 = await q<any>("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'sfp-accrual' AND ref = $1 RETURNING id", [`SFP-${l.code ?? l.id.slice(0, 8)}-${l.month}`]);
+          const r2 = await q<any>("DELETE FROM journal_entries WHERE kind = 'proposed' AND ref = $1 RETURNING id", [`SFP-${l.code ?? l.id.slice(0, 8)}-${l.month}`]);
           accrualsRemoved += r2.length;
         }
       }

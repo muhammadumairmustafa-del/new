@@ -282,7 +282,8 @@ export async function proposeAccruals(db: Db, items: { id: string; month: string
   if (miss.length) throw new Error(`Import the accounts first (missing account roles: ${miss.join(", ")})`);
   const todo = items.filter((l) => l.revenue > 0 && l.month <= upTo.slice(0, 7));
   return db.tx(async (q) => {
-    await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'sfp-accrual'");
+    // accruals may also have arrived through a review pack; they all carry an SFP- reference
+    await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND (source = 'sfp-accrual' OR ref LIKE 'SFP-%')");
     for (const l of todo) {
       const date = monthEnd(l.month) > upTo ? upTo : monthEnd(l.month);
       const lines2: any[] = [
