@@ -13,7 +13,7 @@ import { loadSfpLines, matchCampaigns, type SfpLine } from "./sfp.js";
 export interface CampaignMonth {
   id: string; campaignId: string; month: string; client: string; code: string | null; manager: string | null;
   source: SfpLine["source"]; billedByJazz: boolean; collectFrom: "customer" | "Jazz";
-  campaignValue: number; revenue: number; jazzFee: number; toneperksKeeps: number; jazzKeepsDirect: number;
+  campaignValue: number; revenue: number; sfpRevenue: number; jazzFee: number; toneperksKeeps: number; jazzKeepsDirect: number;
   invoiced: boolean; invoiceNo: string | null; invoiceTotal: number; received: number; toCollect: number;
   jazzPaid: number; jazzToPay: number; jazzDueNow: number;
 }
@@ -34,10 +34,14 @@ export async function monthlyBreakdown(db: Db, s: Snapshot, from: string, to: st
   // All campaign-months up to the end month (earlier months take a campaign's cash first).
   const billable = lines.filter((l) => (l.revenue > 0 || l.campaignValue > 0) && !l.foc && l.month <= toM).sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
   const left = new Map([...cash].map(([k, v]) => [k, { ...v }]));
-  const rows: CampaignMonth[] = billable.map((l) => {
-    const campaignId = l.id.split(":")[0];
-    const m = matches.get(l.id);
-    const share = m ? l.revenue / (perInvoice.get(m.id) || l.revenue || 1) : 0;
+  const rows: CampaignMonth[] = billable.map((l0) => {
+    const campaignId = l0.id.split(":")[0];
+    const m = matches.get(l0.id);
+    // Agreed with the accountants (14 Oct 2026): what TonePerks billed the customer is the revenue, so an
+    // invoiced TonePerks-sourced campaign takes the invoice amount, and the Jazz fee follows it.
+    const aligned = m && l0.source === "callperks_sourced" && !l0.billedByJazz && m.net > 0 && l0.revenue > 0 && Math.abs(m.net - l0.revenue) > 1;
+    const l = aligned ? { ...l0, revenue: m.net, platformFee: l0.platformFee * (m.net / l0.revenue) } : l0;
+    const share = m ? l0.revenue / (perInvoice.get(m.id) || l0.revenue || 1) : 0;
     const invoiceTotal = m ? ((m.gross ?? gross.get(m.id)) ?? 0) * share : l.revenue * (1 + settings.gstRate);
     const c = left.get(campaignId) ?? { received: 0, paid: 0 };
     const received = Math.min(c.received, invoiceTotal); c.received -= received;
@@ -47,7 +51,7 @@ export async function monthlyBreakdown(db: Db, s: Snapshot, from: string, to: st
     const collectFrom = l.source === "callperks_sourced" && !l.billedByJazz ? "customer" : "Jazz";
     return {
       id: l.id, campaignId, month: l.month, client: l.client, code: l.code, manager: l.manager, source: l.source, billedByJazz: !!l.billedByJazz, collectFrom,
-      campaignValue: l.campaignValue, revenue: l.revenue, jazzFee: l.platformFee, toneperksKeeps: l.revenue - l.platformFee,
+      campaignValue: l.campaignValue, revenue: l.revenue, sfpRevenue: l0.revenue, jazzFee: l.platformFee, toneperksKeeps: l.revenue - l.platformFee,
       jazzKeepsDirect: collectFrom === "Jazz" ? Math.max(l.campaignValue - l.revenue, 0) : 0,
       invoiced: !!m, invoiceNo: m ? (m.number ?? null) : null, invoiceTotal, received, toCollect: Math.max(invoiceTotal - received, 0),
       jazzPaid, jazzToPay, jazzDueNow: invoiceTotal > 0 ? jazzToPay * Math.min(1, received / invoiceTotal) : 0,

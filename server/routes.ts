@@ -349,6 +349,8 @@ export function apiRouter(db: Db) {
       questions: z.array(z.object({ code: z.string(), topic: z.string(), question: z.string(), why: z.string().optional() })).default([]),
       proposedEntries: z.array(z.object({ date: zDate, ref: z.string(), memo: z.string(), lines: z.array(z.object({ account: z.string(), debit: z.number().min(0), credit: z.number().min(0), description: z.string().optional() })) })).default([]),
       settings: z.object({ cashplan: z.record(z.unknown()).optional(), company: z.record(z.unknown()).optional(), tax: z.record(z.unknown()).optional(), sfp: z.record(z.unknown()).optional() }).optional(),
+      /** References of proposed entries an earlier pack created that this pack withdraws. */
+      withdraw: z.array(z.string().max(60)).max(200).default([]),
     }).parse(JSON.parse(raw));
     if (pack.settings?.cashplan) await putSetting(db, "cashplan", { ...(await getSetting(db, "cashplan", DEFAULT_CASHPLAN)), ...pack.settings.cashplan });
     if (pack.settings?.company) await putSetting(db, "company", { ...(await getSetting(db, "company", { name: "TonePerks LLP", defaultFy: null })), ...pack.settings.company });
@@ -358,6 +360,7 @@ export function apiRouter(db: Db) {
     const missing = [...new Set(pack.proposedEntries.flatMap((e) => e.lines.map((l) => l.account)).filter((n) => !accts.has(n)))];
     if (missing.length) return res.status(400).json({ error: `Unknown accounts in proposed entries (import the ledger first): ${missing.join(", ")}` });
     await db.tx(async (q) => {
+      for (const ref of pack.withdraw) await q("DELETE FROM journal_entries WHERE ref = $1 AND kind = 'proposed'", [ref]);
       for (const f of pack.findings) await q(`INSERT INTO findings (code, title, severity, area, detail, impact, recommendation, owner, due_date) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (code) DO UPDATE SET title=EXCLUDED.title, severity=EXCLUDED.severity, area=EXCLUDED.area, detail=EXCLUDED.detail, impact=EXCLUDED.impact, recommendation=EXCLUDED.recommendation, updated_at=now()`,
         [f.code ?? null, f.title, f.severity, f.area, f.detail, f.impact ?? null, f.recommendation ?? null, f.owner ?? null, f.dueDate ?? null]);
@@ -369,7 +372,7 @@ export function apiRouter(db: Db) {
       }
     });
     await log(req, "review-pack", { findings: pack.findings.length, questions: pack.questions.length, proposed: pack.proposedEntries.length });
-    res.json({ ok: true, findings: pack.findings.length, questions: pack.questions.length, proposedEntries: pack.proposedEntries.length });
+    res.json({ ok: true, findings: pack.findings.length, questions: pack.questions.length, proposedEntries: pack.proposedEntries.length, withdrawn: pack.withdraw.length });
   }));
 
   // ------------------------------------------------------------------ import
