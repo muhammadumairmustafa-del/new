@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from "react";
 import { NavLink, Route, Routes, Navigate, useLocation } from "react-router-dom";
-import { LayoutDashboard, FileSpreadsheet, Wallet, Landmark, Users, BookOpen, ShieldAlert, Upload, Settings as Cog, LogOut, Receipt, Sun, Moon, TrendingUp } from "lucide-react";
+import { LayoutDashboard, FileSpreadsheet, Wallet, Landmark, Users, BookOpen, ShieldAlert, Upload, Settings as Cog, LogOut, Receipt, Sun, Moon, TrendingUp, CalendarRange } from "lucide-react";
 import { api, useApi } from "./api";
 import { cx } from "./components/ui";
 import { fyLabel } from "./format";
@@ -11,6 +11,7 @@ import CashPlan from "./pages/CashPlan";
 import Tax from "./pages/Tax";
 import Receivables from "./pages/Receivables";
 import Revenue from "./pages/Revenue";
+import Monthly from "./pages/Monthly";
 import Partners from "./pages/Partners";
 import Ledger from "./pages/Ledger";
 import Audit from "./pages/Audit";
@@ -23,6 +24,7 @@ export const usePeriod = () => useContext(Ctx);
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
+  { to: "/monthly", label: "Monthly breakdown", icon: CalendarRange },
   { to: "/statements", label: "Financial statements", icon: FileSpreadsheet },
   { to: "/revenue", label: "Revenue (Sales Flow Pro)", icon: TrendingUp },
   { to: "/cash-plan", label: "Cash & payment plan", icon: Wallet },
@@ -136,6 +138,7 @@ function Shell({ user }: { user: any }) {
               <Route path="/tax" element={<Tax />} />
               <Route path="/receivables" element={<Receivables />} />
               <Route path="/revenue" element={<Revenue />} />
+              <Route path="/monthly" element={<Monthly />} />
               <Route path="/partners" element={<Partners />} />
               <Route path="/ledger" element={<Ledger />} />
               <Route path="/audit" element={<Audit />} />

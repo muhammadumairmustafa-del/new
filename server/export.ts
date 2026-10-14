@@ -89,3 +89,34 @@ export async function statementsWorkbook(data: { company: string; fyLabel: strin
   void monthEnd;
   return Buffer.from(await wb.xlsx.writeBuffer());
 }
+
+const SOURCE: Record<string, string> = { callperks_sourced: "TonePerks (CallPerks)", jazz_sourced: "Jazz sourced", jazz_internal: "Jazz internal (Jazz Cash)" };
+
+/** Month-by-month revenue, who brought it, what is owed to Jazz and what is still to collect. */
+export async function monthlyWorkbook(company: string, generated: string, d: any, adjusted: boolean) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator = "TonePerks Finance Platform";
+  const sub = `${monthLabel(d.months[0])} – ${monthLabel(d.months[d.months.length - 1])} · PKR · generated ${generated}${adjusted ? " · books include proposed adjustments" : ""}`;
+  const r0 = (n: number) => Math.round(n);
+  const tot = (k: string) => r0(d.byMonth.reduce((a: number, m: any) => a + m[k], 0));
+  sheet(wb, "Monthly summary", `${company} — Monthly breakdown (campaigns run in the month)`, sub,
+    ["Month", "Campaigns", "Revenue", "…brought by TonePerks", "…Jazz sourced", "…Jazz Cash (internal)", "Jazz 40% fee", "TonePerks keeps", "Invoiced", "Not invoiced yet", "Invoice total incl. tax", "Received (cash + tax withheld)", "Still to collect", "…of which from Jazz", "Jazz fee still to pay", "…due now (customer has paid)"],
+    [...d.byMonth.map((m: any) => [monthLabel(m.month), m.campaigns, r0(m.revenue), r0(m.bySource.callperks_sourced), r0(m.bySource.jazz_sourced), r0(m.bySource.jazz_internal), r0(m.jazzFee), r0(m.toneperksKeeps), r0(m.invoiced), r0(m.notInvoiced), r0(m.invoiceTotal), r0(m.received), r0(m.toCollect), r0(m.toCollectFromJazz), r0(m.jazzToPay), r0(m.jazzDueNow)]),
+     ["Total", tot("campaigns"), tot("revenue"), r0(d.byMonth.reduce((a: number, m: any) => a + m.bySource.callperks_sourced, 0)), r0(d.byMonth.reduce((a: number, m: any) => a + m.bySource.jazz_sourced, 0)), r0(d.byMonth.reduce((a: number, m: any) => a + m.bySource.jazz_internal, 0)), tot("jazzFee"), tot("toneperksKeeps"), tot("invoiced"), tot("notInvoiced"), tot("invoiceTotal"), tot("received"), tot("toCollect"), tot("toCollectFromJazz"), tot("jazzToPay"), tot("jazzDueNow")]],
+    { boldRows: new Set([d.byMonth.length]), widths: [12, 10, 15, 15, 14, 14, 14, 15, 14, 14, 15, 16, 15, 14, 15, 15] });
+  const bt = (k: string) => r0(d.byMonth.reduce((a: number, m: any) => a + m.books[k], 0));
+  sheet(wb, "Books by month", `${company} — The books, month by month`, `${sub} · revenue is booked in the month of the invoice`,
+    ["Month", "Revenue booked", "Jazz fee booked", "Paid to Jazz", "Owed to Jazz (month end)", "Cash collected from customers", "Receivables (month end)", "Bank (month end)"],
+    [...d.byMonth.map((m: any) => [monthLabel(m.month), r0(m.books.revenue), r0(m.books.jazzFee), r0(m.books.jazzPaid), r0(m.books.jazzPayableEnd), r0(m.books.collected), r0(m.books.receivableEnd), r0(m.books.bankEnd)]),
+     ["Total", bt("revenue"), bt("jazzFee"), bt("jazzPaid"), null, bt("collected"), null, null]],
+    { boldRows: new Set([d.byMonth.length]), widths: [12, 16, 16, 14, 18, 18, 18, 16] });
+  sheet(wb, "By client", `${company} — By client and who brought it`, sub,
+    ["Client", "Brought by", "Collect from", "Campaign-months", "Months", "Revenue", "Jazz fee", "TonePerks keeps", "Not invoiced yet", "Invoice total incl. tax", "Received", "Still to collect", "Jazz fee to pay", "…due now"],
+    d.byClient.map((c: any) => [c.client, SOURCE[c.source], c.collectFrom, c.campaigns, c.months.map(monthLabel).join(", "), r0(c.revenue), r0(c.jazzFee), r0(c.toneperksKeeps), r0(c.notInvoiced), r0(c.invoiceTotal), r0(c.received), r0(c.toCollect), r0(c.jazzToPay), r0(c.jazzDueNow)]),
+    { widths: [26, 22, 12, 10, 30, 14, 13, 14, 14, 15, 14, 14, 14, 13] });
+  sheet(wb, "Campaigns", `${company} — Every campaign-month`, sub,
+    ["Month", "Code", "Client", "Brought by", "Manager", "Collect from", "Campaign value", "Revenue", "Jazz fee", "TonePerks keeps", "Invoice #", "Invoice total incl. tax", "Received", "Still to collect", "Jazz fee paid", "Jazz fee to pay", "…due now"],
+    d.campaigns.map((r: any) => [monthLabel(r.month), r.code, r.client, SOURCE[r.source] + (r.billedByJazz ? " · billed by Jazz" : ""), r.manager, r.collectFrom, r0(r.campaignValue), r0(r.revenue), r0(r.jazzFee), r0(r.toneperksKeeps), r.invoiced ? (r.invoiceNo ?? "yes") : "NOT INVOICED", r0(r.invoiceTotal), r0(r.received), r0(r.toCollect), r0(r.jazzPaid), r0(r.jazzToPay), r0(r.jazzDueNow)]),
+    { widths: [10, 9, 26, 26, 16, 12, 14, 13, 12, 14, 12, 15, 13, 14, 12, 13, 12] });
+  return Buffer.from(await wb.xlsx.writeBuffer());
+}

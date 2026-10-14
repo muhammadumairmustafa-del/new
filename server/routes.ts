@@ -11,7 +11,8 @@ import { taxPosition, advanceTaxSchedule } from "./tax-position.js";
 import { buildCashPlan } from "./cashplan.js";
 import { runChecks } from "./checks.js";
 import { DEFAULT_CASHPLAN, DEFAULT_TAX, getSetting, putSetting, type CashPlanSettings, type TaxSettings } from "./settings.js";
-import { statementsWorkbook } from "./export.js";
+import { monthlyWorkbook, statementsWorkbook } from "./export.js";
+import { monthlyBreakdown } from "./monthly.js";
 import { docRegister, DOC_INSERT, DOC_ROW, linkedLines, loadDocs, resolveBooks } from "./docs.js";
 import { DEFAULT_SFP, loadSfpLines, matchCampaigns, prefillReceived, proposeAccruals, readSfpFromEnv, reconcile, storeSnapshot } from "./sfp.js";
 import { fiscalYearOf, fyRange, monthEnd, monthsBetween } from "../shared/fiscal.js";
@@ -478,6 +479,28 @@ export function apiRouter(db: Db) {
     await log(req, "campaign_cash.delete", { id: Number(req.params.id) }); res.json({ ok: true });
   }));
 
+  // ------------------------------------------------------------------ monthly breakdown
+  const monthlyRange = (req: Request) => {
+    const t = today(req);
+    const end = monthEnd(t.slice(0, 7));
+    if (req.query.fy) { const r = fyRange(Number(req.query.fy)); return { from: r.from, to: r.to < end ? r.to : end }; }
+    return { from: typeof req.query.from === "string" ? req.query.from : "2025-07-01", to: end };
+  };
+  r.get("/monthly", wrap(async (req, res) => {
+    const { from, to } = monthlyRange(req);
+    res.json(await monthlyBreakdown(db, await snap(req), from, to));
+  }));
+  r.get("/monthly.xlsx", wrap(async (req, res) => {
+    const { from, to } = monthlyRange(req);
+    const d = await monthlyBreakdown(db, await snap(req), from, to);
+    const company = (await getSetting(db, "company", { name: "TonePerks LLP" }) as any).name;
+    const buf = await monthlyWorkbook(company, todayPk(), d, req.query.proposed === "1");
+    await log(req, "export.monthly", { from, to });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="TonePerks_monthly_${from.slice(0, 7)}_to_${to.slice(0, 7)}.xlsx"`);
+    res.send(buf);
+  }));
+
   // ------------------------------------------------------------------ source documents (issued invoices, receipts, Jazz release orders)
   r.get("/invoice-docs", wrap(async (_req, res) => {
     const docs = await loadDocs(db);
@@ -531,7 +554,8 @@ export function apiRouter(db: Db) {
     // missing from the books, or booked at nil value
     const todo = docs.filter((d) => { const b = d.kind === "invoice" && d.docDate && d.net > 0 ? resolveBooks(d, invoices) : undefined; return b === null || (b && Number(b.net_amount) === 0); });
     const out = await db.tx(async (q) => {
-      await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'doc-invoice'");
+      // also replaces copies that arrived through a review pack (same INV- reference)
+      await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND (source = 'doc-invoice' OR ref LIKE 'INV-%')");
       let accrualsRemoved = 0;
       for (const d of todo) {
         const ls = linkedLines(d, lines);
