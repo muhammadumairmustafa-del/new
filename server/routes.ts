@@ -12,6 +12,7 @@ import { buildCashPlan } from "./cashplan.js";
 import { runChecks } from "./checks.js";
 import { DEFAULT_CASHPLAN, DEFAULT_TAX, getSetting, putSetting, type CashPlanSettings, type TaxSettings } from "./settings.js";
 import { statementsWorkbook } from "./export.js";
+import { docRegister, DOC_INSERT, DOC_ROW, linkedLines, loadDocs, resolveBooks } from "./docs.js";
 import { DEFAULT_SFP, loadSfpLines, matchCampaigns, prefillReceived, proposeAccruals, readSfpFromEnv, reconcile, storeSnapshot } from "./sfp.js";
 import { fiscalYearOf, fyRange, monthEnd, monthsBetween } from "../shared/fiscal.js";
 import { fromUnits, toUnits } from "../shared/money.js";
@@ -445,7 +446,8 @@ export function apiRouter(db: Db) {
       const c = camp.get(l.id.split(":")[0]); if (!c) continue;
       const m = matches.get(l.id);
       const share = m ? l.revenue / (perInvoice.get(m.id) || l.revenue || 1) : 0;
-      c.invoiceTotal = (c.invoiceTotal ?? 0) + (m ? (gross.get(m.id) ?? 0) * share : l.revenue * (1 + sfpSet.gstRate));
+      c.invoiceTotal = (c.invoiceTotal ?? 0) + (m ? ((m.gross ?? gross.get(m.id)) ?? 0) * share : l.revenue * (1 + sfpSet.gstRate));
+      if (l.billedByJazz) c.billedByJazz = true;
       if (m) c.invoiced = true;
     }
     res.json({
@@ -474,6 +476,87 @@ export function apiRouter(db: Db) {
   r.delete("/campaign-cash/:id", requireRole("accountant"), wrap(async (req, res) => {
     await db.query("DELETE FROM campaign_cash WHERE id = $1", [Number(req.params.id)]);
     await log(req, "campaign_cash.delete", { id: Number(req.params.id) }); res.json({ ok: true });
+  }));
+
+  // ------------------------------------------------------------------ source documents (issued invoices, receipts, Jazz release orders)
+  r.get("/invoice-docs", wrap(async (_req, res) => {
+    const docs = await loadDocs(db);
+    const invoices = await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled' ORDER BY invoice_date, id");
+    const { lines, settings } = await loadSfpLines(db);
+    const { matches } = await matchCampaigns(db, lines, settings.clientAliases ?? {});
+    res.json({
+      docs: docRegister(docs, invoices, lines, new Map([...matches].map(([k, m]) => [k, m.id]))),
+      invoices: invoices.map((i) => ({ id: i.id, number: i.number, client: i.client, date: isoDate(i.invoice_date), net: Number(i.net_amount) })),
+      campaigns: lines.map((l) => ({ id: l.id, client: l.client, code: l.code, month: l.month, value: l.campaignValue, revenue: l.revenue, source: l.source })),
+    });
+  }));
+  const zDoc = z.object({ kind: z.enum(["invoice", "receipt", "jazz_billed"]), docNo: z.string().max(40).nullable().optional(), docDate: zDate.nullable().optional(),
+    client: z.string().min(1).max(160), billedTo: z.string().max(200).nullable().optional(), campaignPeriod: z.string().max(200).nullable().optional(),
+    net: z.number().min(0).default(0), gst: z.number().min(0).default(0), gross: z.number().min(0).default(0),
+    booksNumber: z.string().max(40).nullable().optional(), booksClient: z.string().max(160).nullable().optional(),
+    campaignIds: z.array(z.string().max(80)).max(40).default([]), title: z.string().max(300).nullable().optional(),
+    url: z.string().max(500).regex(/^https:\/\//).nullable().optional(), note: z.string().max(1000).nullable().optional() });
+  r.post("/invoice-docs/import", requireRole("partner"), wrap(async (req, res) => {
+    const b = z.object({ docs: z.array(zDoc).max(500), replace: z.boolean().default(false) }).parse(req.body);
+    await db.tx(async (q) => {
+      if (b.replace) await q("DELETE FROM invoice_docs");
+      for (const d of b.docs) await q(DOC_INSERT, DOC_ROW(d));
+    });
+    await log(req, "invoice_docs.import", { docs: b.docs.length, replace: b.replace }); res.json({ ok: true, docs: b.docs.length });
+  }));
+  r.patch("/invoice-docs/:id", requireRole("accountant"), wrap(async (req, res) => {
+    const b = z.object({ booksNumber: z.string().max(40).nullable().optional(), booksClient: z.string().max(160).nullable().optional(),
+      campaignIds: z.array(z.string().max(80)).max(40).optional(), note: z.string().max(1000).nullable().optional() }).parse(req.body);
+    const id = Number(req.params.id);
+    const sets: string[] = []; const vals: unknown[] = [];
+    if (b.booksNumber !== undefined) { vals.push(b.booksNumber); sets.push(`books_number = $${vals.length}`); }
+    if (b.booksClient !== undefined) { vals.push(b.booksClient); sets.push(`books_client = $${vals.length}`); }
+    if (b.campaignIds !== undefined) { vals.push(JSON.stringify(b.campaignIds)); sets.push(`campaign_ids = $${vals.length}::jsonb`); }
+    if (b.note !== undefined) { vals.push(b.note); sets.push(`note = $${vals.length}`); }
+    if (sets.length) { vals.push(id); await db.query(`UPDATE invoice_docs SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals); }
+    await log(req, "invoice_docs.update", { id, ...b }); res.json({ ok: true });
+  }));
+  r.delete("/invoice-docs/:id", requireRole("partner"), wrap(async (req, res) => {
+    await db.query("DELETE FROM invoice_docs WHERE id = $1", [Number(req.params.id)]);
+    await log(req, "invoice_docs.delete", { id: Number(req.params.id) }); res.json({ ok: true });
+  }));
+  /** Proposed journal entries for issued invoices that are missing from the books (replacing any SFP accrual for the same campaign-month). */
+  r.post("/invoice-docs/propose", requireRole("partner"), wrap(async (req, res) => {
+    const docs = await loadDocs(db);
+    const invoices = await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled'");
+    const { lines } = await loadSfpLines(db);
+    const accts = new Map((await db.query<any>("SELECT id, system_role FROM accounts WHERE system_role IS NOT NULL")).map((a) => [a.system_role, a.id]));
+    const miss = ["receivable", "revenue", "sales_tax_payable", "platform_fee", "jazz_payable"].filter((k) => !accts.has(k));
+    if (miss.length) return res.status(400).json({ error: `Import the accounts first (missing account roles: ${miss.join(", ")})` });
+    // missing from the books, or booked at nil value
+    const todo = docs.filter((d) => { const b = d.kind === "invoice" && d.docDate && d.net > 0 ? resolveBooks(d, invoices) : undefined; return b === null || (b && Number(b.net_amount) === 0); });
+    const out = await db.tx(async (q) => {
+      await q("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'doc-invoice'");
+      let accrualsRemoved = 0;
+      for (const d of todo) {
+        const ls = linkedLines(d, lines);
+        const value = ls.reduce((a, l) => a + l.revenue, 0);
+        const fee = value ? ls.reduce((a, l) => a + l.platformFee, 0) * (d.net / value) : 0;
+        const jl: any[] = [
+          { accountId: accts.get("receivable"), debit: d.gross || d.net + d.gst, credit: 0, description: `Invoice #${d.docNo ?? "–"} ${d.client}` },
+          { accountId: accts.get("revenue"), debit: 0, credit: d.net, description: d.campaignPeriod ?? null },
+        ];
+        if (d.gst > 0) jl.push({ accountId: accts.get("sales_tax_payable"), debit: 0, credit: d.gst, description: "Output sales tax" });
+        const diff = Math.round(((d.gross || d.net + d.gst) - d.net - d.gst) * 100) / 100;
+        if (Math.abs(diff) >= 0.01) jl.push({ accountId: accts.get("revenue"), debit: diff < 0 ? -diff : 0, credit: diff > 0 ? diff : 0, description: "Rounding on invoice" });
+        if (fee > 0.5) jl.push({ accountId: accts.get("platform_fee"), debit: Math.round(fee * 100) / 100, credit: 0, description: "Jazz share" },
+          { accountId: accts.get("jazz_payable"), debit: 0, credit: Math.round(fee * 100) / 100, description: "Jazz share" });
+        // revenue belongs to the month the campaign ran when the invoice is dated later
+        const served = ls.length ? ls.map((l) => monthEnd(l.month)).sort().at(-1)! : d.docDate!;
+        await postEntry(q, { date: served < d.docDate! ? served : d.docDate!, ref: `INV-${d.docNo ?? d.id}`, memo: `Invoice issued but not in the books: #${d.docNo ?? "–"} ${d.client} (${d.campaignPeriod ?? ""})`, source: "doc-invoice", kind: "proposed", userId: req.user!.id, lines: jl });
+        for (const l of ls) {
+          const r2 = await q<any>("DELETE FROM journal_entries WHERE kind = 'proposed' AND source = 'sfp-accrual' AND ref = $1 RETURNING id", [`SFP-${l.code ?? l.id.slice(0, 8)}-${l.month}`]);
+          accrualsRemoved += r2.length;
+        }
+      }
+      return { entries: todo.length, revenue: todo.reduce((a, d) => a + d.net, 0), salesTax: todo.reduce((a, d) => a + d.gst, 0), accrualsRemoved };
+    });
+    await log(req, "invoice_docs.propose", out); res.json(out);
   }));
 
   // ------------------------------------------------------------------ partners & settings

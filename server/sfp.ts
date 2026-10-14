@@ -1,6 +1,7 @@
 import type { Db } from "./db.js";
 import { postEntry, isoDate } from "./ledger.js";
 import { monthEnd, fiscalYearOf, monthsBetween, fyRange } from "../shared/fiscal.js";
+import { applyJazzBilled, linkedLines, loadDocs, resolveBooks } from "./docs.js";
 
 /**
  * Sales Flow Pro (SFP) integration. SFP is the operational system where campaigns are
@@ -91,6 +92,7 @@ export interface SfpLine {
   revenue: number;        // what TonePerks books as revenue
   platformFee: number;    // Jazz share TonePerks owes (CallPerks-sourced only)
   basis: string;
+  billedByJazz?: boolean; // per a source document: Jazz billed the customer, TonePerks invoices Jazz for its share
 }
 
 /**
@@ -149,14 +151,15 @@ export async function loadSfpLines(db: Db) {
   const parse = (r: any) => (typeof r.data === "string" ? JSON.parse(r.data) : r.data);
   const rows = (await db.query<any>("SELECT data FROM sfp_campaigns")).map(parse);
   const payments = (await db.query<any>("SELECT data FROM sfp_payments")).map(parse);
-  const lines = rows.flatMap((c) => campaignLines(c, payments, s));
+  const lines = applyJazzBilled(rows.flatMap((c) => campaignLines(c, payments, s)), await loadDocs(db));
   const lastSync = (await db.query<any>("SELECT value FROM settings WHERE key='sfp.lastSync'"))[0]?.value ?? null;
   return { settings: s, lines, lastSync };
 }
 
 /** Campaign-by-invoice matching across ALL periods (invoices often follow the service month). */
 export async function matchCampaigns(db: Db, lines: SfpLine[], aliases: Record<string, string>) {
-  const allInv = (await db.query<any>("SELECT id, number, client, invoice_date, net_amount, status FROM invoices WHERE coalesce(status,'') <> 'cancelled' AND net_amount > 0"))
+  const rows = await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled'");
+  const allInv: { id: number; number: string | null; client: string; date: string; net: number; gross?: number; jazz?: number; virtual?: boolean }[] = rows.filter((i) => Number(i.net_amount) > 0)
     .map((i) => ({ id: i.id, number: i.number, client: i.client as string, date: isoDate(i.invoice_date), net: Number(i.net_amount) }));
   const k2 = clientKeyer([...lines.map((l) => l.client), ...allInv.map((i) => i.client)], aliases);
   const used = new Set<number>();
@@ -164,7 +167,25 @@ export async function matchCampaigns(db: Db, lines: SfpLine[], aliases: Record<s
   const days = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86400000;
   const matches = new Map<string, any>();
   const billable = lines.filter((l) => l.revenue > 0).sort((a, b) => (a.month < b.month ? -1 : 1));
+  // Pass zero: source documents link invoices to campaigns explicitly. An issued invoice the books do not
+  // have yet still bills its campaigns (negative id = document, not a register row).
+  for (const d of (await loadDocs(db)).filter((x) => x.kind === "invoice")) {
+    const ls = linkedLines(d, billable).filter((l) => !matches.has(l.id));
+    const b = resolveBooks(d, rows);
+    let inv = b ? allInv.find((i) => i.id === b.id) : undefined;
+    if (b && !inv && d.net > 0) { inv = { id: b.id, number: b.number, client: b.client, date: isoDate(b.invoice_date), net: d.net, gross: d.gross }; allInv.push(inv); } // booked at nil value
+    if (!b) {
+      const total = ls.reduce((a, l) => a + l.revenue, 0) || 1;
+      inv = { id: -d.id, number: d.docNo, client: d.client, date: d.docDate ?? "", net: d.net, gross: d.gross, virtual: true, jazz: ls.reduce((a, l) => a + l.platformFee, 0) * (d.net / total) };
+      allInv.push(inv);
+    }
+    if (!inv || !ls.length) continue;
+    used.add(inv.id);
+    const total = ls.reduce((a, l) => a + l.revenue, 0) || 1;
+    for (const l of ls) matches.set(l.id, ls.length > 1 ? { ...inv, net: inv.net * (l.revenue / total), grouped: ls.length, byDocument: true } : { ...inv, byDocument: true });
+  }
   for (const l of billable) {
+    if (matches.has(l.id)) continue;
     const cands = allInv.filter((i) => !used.has(i.id) && k2(i.client) === k2(l.client) && days(monthStart(l.month), i.date) >= -45 && days(monthStart(l.month), i.date) <= 185);
     cands.sort((a, b) => Math.abs(a.net - l.revenue) / l.revenue - Math.abs(b.net - l.revenue) / l.revenue || (a.date < b.date ? -1 : 1));
     const best = cands.find((i) => Math.abs(i.net - l.revenue) <= Math.max(0.25 * l.revenue, 1000));
@@ -218,8 +239,11 @@ export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSale
   const { from, to } = fyRange(fy);
   const months = monthsBetween(from, to);
   const inFy = lines.filter((l) => l.month >= from.slice(0, 7) && l.month <= to.slice(0, 7));
+  const { matches, used, allInv, billable } = await matchCampaigns(db, lines, aliases);
   const inv = (await db.query<any>("SELECT client, invoice_date, net_amount, jazz_share, status FROM invoices WHERE coalesce(status,'') <> 'cancelled'"))
     .map((i) => ({ client: i.client as string, month: isoDate(i.invoice_date).slice(0, 7), net: Number(i.net_amount), jazz: Number(i.jazz_share) }))
+    // issued invoices the books do not have yet (from the source documents)
+    .concat(allInv.filter((i) => i.virtual).map((i) => ({ client: i.client, month: i.date.slice(0, 7), net: i.net, jazz: i.jazz ?? 0 })))
     .filter((i) => i.month >= from.slice(0, 7) && i.month <= to.slice(0, 7));
   const byMonth = months.map((m) => {
     const ls = inFy.filter((l) => l.month === m);
@@ -234,7 +258,6 @@ export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSale
   for (const i of inv) { const k = key(i.client); const c = clients.get(k) ?? { key: k, names: new Set<string>(), sfpRevenue: 0, sfpPlatformFee: 0, invoiced: 0, invoicedJazz: 0, campaigns: 0, invoices: 0 }; c.names.add(i.client); c.invoiced += i.net; c.invoicedJazz += i.jazz; c.invoices++; clients.set(k, c); }
   const byClient = [...clients.values()].map((c) => ({ ...c, names: [...c.names], difference: c.sfpRevenue - c.invoiced, jazzDifference: c.sfpPlatformFee - c.invoicedJazz }))
     .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
-  const { matches, used, allInv, billable } = await matchCampaigns(db, lines, aliases);
   const inFyIds = new Set(inFy.map((l) => l.id));
   const notInvoiced = billable.filter((l) => inFyIds.has(l.id) && !matches.has(l.id) && l.month <= today.slice(0, 7))
     .map((l) => ({ id: l.id, month: l.month, client: l.client, code: l.code, source: l.source, revenue: l.revenue, platformFee: l.platformFee, status: l.status }));
@@ -302,8 +325,20 @@ export async function prefillReceived(db: Db, lines: SfpLine[], aliases: Record<
   for (const l of lines) { const m = matches.get(l.id); if (m) { const a = byInvoice.get(m.id) ?? []; a.push(l); byInvoice.set(m.id, a); } }
   const entries: { campaignId: string; date: string; amount: number; withheld: number; counterparty: string; reference: string; note: string }[] = [];
   const unallocated: { number: string | null; client: string; received: number }[] = [];
+  // Bank receipts (source documents) that the books put on another invoice, or on none: they go to the
+  // campaign they paid for, and come off the invoice the accountant booked them under.
+  const moved = new Map<number, number>();
+  for (const d of (await loadDocs(db)).filter((x) => x.kind === "receipt" && x.gross > 0)) {
+    const l = linkedLines(d, lines)[0];
+    if (!l) continue;
+    const b = resolveBooks(d, [...inv.values()]);
+    if (b && byInvoice.get(b.id)?.some((x) => x.id.split(":")[0] === l.id.split(":")[0])) continue; // already on the right campaign
+    if (b) moved.set(b.id, (moved.get(b.id) ?? 0) + d.gross);
+    entries.push({ campaignId: l.id.split(":")[0], date: d.docDate ?? isoDate(new Date()), amount: d.gross, withheld: 0, counterparty: d.billedTo || d.client,
+      reference: d.title ?? "Bank receipt", note: `Per bank receipt in the invoice folder${b ? ` · the books put it on #${b.number ?? "–"} ${b.client}` : ""}` });
+  }
   for (const [id, i] of inv) {
-    const received = Number(i.received); if (received <= 0.5) continue;
+    const received = Number(i.received) - (moved.get(id) ?? 0); if (received <= 0.5) continue;
     const ls = byInvoice.get(id);
     const withheld = Number(i.income_tax_withheld || 0) + Number(i.sales_tax_withheld || 0);
     if (!ls) { unallocated.push({ number: i.number, client: i.client, received }); continue; }

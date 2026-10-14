@@ -171,5 +171,24 @@ ALTER TABLE campaign_cash ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 
 CREATE TABLE IF NOT EXISTS sfp_targets (
   id TEXT PRIMARY KEY,
   data JSONB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS invoice_docs (
+  id SERIAL PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('invoice','receipt','jazz_billed')),
+  doc_no TEXT,
+  doc_date DATE,
+  client TEXT NOT NULL,
+  billed_to TEXT,
+  campaign_period TEXT,
+  net NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gst NUMERIC(18,2) NOT NULL DEFAULT 0,
+  gross NUMERIC(18,2) NOT NULL DEFAULT 0,
+  books_number TEXT,
+  books_client TEXT,
+  campaign_ids JSONB NOT NULL DEFAULT '[]',
+  title TEXT,
+  url TEXT,
+  note TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 )
 `;
