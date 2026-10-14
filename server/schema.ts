@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS campaign_cash (
 );
 CREATE INDEX IF NOT EXISTS campaign_cash_campaign_idx ON campaign_cash(campaign_id);
 ALTER TABLE campaign_cash ADD COLUMN IF NOT EXISTS withheld NUMERIC(18,2) NOT NULL DEFAULT 0;
+ALTER TABLE campaign_cash ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'manual';
 CREATE TABLE IF NOT EXISTS sfp_targets (
   id TEXT PRIMARY KEY,
   data JSONB NOT NULL

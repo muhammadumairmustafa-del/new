@@ -154,6 +154,44 @@ export async function loadSfpLines(db: Db) {
   return { settings: s, lines, lastSync };
 }
 
+/** Campaign-by-invoice matching across ALL periods (invoices often follow the service month). */
+export async function matchCampaigns(db: Db, lines: SfpLine[], aliases: Record<string, string>) {
+  const allInv = (await db.query<any>("SELECT id, number, client, invoice_date, net_amount, status FROM invoices WHERE coalesce(status,'') <> 'cancelled' AND net_amount > 0"))
+    .map((i) => ({ id: i.id, number: i.number, client: i.client as string, date: isoDate(i.invoice_date), net: Number(i.net_amount) }));
+  const k2 = clientKeyer([...lines.map((l) => l.client), ...allInv.map((i) => i.client)], aliases);
+  const used = new Set<number>();
+  const monthStart = (m: string) => `${m}-01`;
+  const days = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86400000;
+  const matches = new Map<string, any>();
+  const billable = lines.filter((l) => l.revenue > 0).sort((a, b) => (a.month < b.month ? -1 : 1));
+  for (const l of billable) {
+    const cands = allInv.filter((i) => !used.has(i.id) && k2(i.client) === k2(l.client) && days(monthStart(l.month), i.date) >= -45 && days(monthStart(l.month), i.date) <= 185);
+    cands.sort((a, b) => Math.abs(a.net - l.revenue) / l.revenue - Math.abs(b.net - l.revenue) / l.revenue || (a.date < b.date ? -1 : 1));
+    const best = cands.find((i) => Math.abs(i.net - l.revenue) <= Math.max(0.25 * l.revenue, 1000));
+    if (best) { used.add(best.id); matches.set(l.id, best); }
+  }
+  // Second pass: one invoice can bill several campaigns of the same customer (e.g. branches, repeats).
+  for (const inv of allInv.filter((i) => !used.has(i.id))) {
+    const pool = billable.filter((l) => !matches.has(l.id) && k2(l.client) === k2(inv.client) && days(monthStart(l.month), inv.date) >= -45 && days(monthStart(l.month), inv.date) <= 185).slice(0, 12);
+    let best: SfpLine[] | null = null;
+    for (let mask = 1; mask < 1 << pool.length; mask++) {
+      const sub = pool.filter((_, i) => mask & (1 << i));
+      if (sub.length < 2) continue;
+      const sum = sub.reduce((a, l) => a + l.revenue, 0);
+      if (Math.abs(sum - inv.net) <= Math.max(0.02 * inv.net, 1000) && (!best || sub.length < best.length)) best = sub;
+    }
+    if (best) { used.add(inv.id); for (const l of best) matches.set(l.id, { ...inv, net: l.revenue, grouped: best.length }); }
+  }
+  // Third pass: an invoice and a campaign-month that are the only unmatched pair for that customer in the window
+  // (e.g. a "final settlement" invoice that differs from the campaign value).
+  for (const inv of allInv.filter((i) => !used.has(i.id))) {
+    const pool = billable.filter((l) => !matches.has(l.id) && k2(l.client) === k2(inv.client) && days(monthStart(l.month), inv.date) >= -45 && days(monthStart(l.month), inv.date) <= 185);
+    const otherInv = allInv.filter((j) => j.id !== inv.id && !used.has(j.id) && k2(j.client) === k2(inv.client) && pool.some((l) => days(monthStart(l.month), j.date) >= -45 && days(monthStart(l.month), j.date) <= 185));
+    if (pool.length === 1 && otherInv.length === 0) { used.add(inv.id); matches.set(pool[0].id, { ...inv, loose: true }); }
+  }
+  return { matches, used, allInv, billable };
+}
+
 /** Normalise company names for matching ("Ideas Pvt. Ltd" ~ "IDEAS PRIVATE LIMITED"). */
 export function normClient(n: string) {
   return n.toLowerCase().replace(/\(.*?\)/g, " ").replace(/\b(pvt|private|ltd|limited|pakistan|plc|co|company|bank|the|via)\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean).slice(0, 2).join(" ");
@@ -196,33 +234,7 @@ export async function reconcile(db: Db, lines: SfpLine[], fy: number, ledgerSale
   for (const i of inv) { const k = key(i.client); const c = clients.get(k) ?? { key: k, names: new Set<string>(), sfpRevenue: 0, sfpPlatformFee: 0, invoiced: 0, invoicedJazz: 0, campaigns: 0, invoices: 0 }; c.names.add(i.client); c.invoiced += i.net; c.invoicedJazz += i.jazz; c.invoices++; clients.set(k, c); }
   const byClient = [...clients.values()].map((c) => ({ ...c, names: [...c.names], difference: c.sfpRevenue - c.invoiced, jazzDifference: c.sfpPlatformFee - c.invoicedJazz }))
     .sort((a, b) => Math.abs(b.difference) - Math.abs(a.difference));
-  // Campaign-by-invoice matching across ALL periods (invoices often follow the service month).
-  const allInv = (await db.query<any>("SELECT id, number, client, invoice_date, net_amount, status FROM invoices WHERE coalesce(status,'') <> 'cancelled' AND net_amount > 0"))
-    .map((i) => ({ id: i.id, number: i.number, client: i.client as string, date: isoDate(i.invoice_date), net: Number(i.net_amount) }));
-  const k2 = clientKeyer([...lines.map((l) => l.client), ...allInv.map((i) => i.client)], aliases);
-  const used = new Set<number>();
-  const monthStart = (m: string) => `${m}-01`;
-  const days = (a: string, b: string) => (Date.parse(b) - Date.parse(a)) / 86400000;
-  const matches = new Map<string, any>();
-  const billable = lines.filter((l) => l.revenue > 0).sort((a, b) => (a.month < b.month ? -1 : 1));
-  for (const l of billable) {
-    const cands = allInv.filter((i) => !used.has(i.id) && k2(i.client) === k2(l.client) && days(monthStart(l.month), i.date) >= -45 && days(monthStart(l.month), i.date) <= 185);
-    cands.sort((a, b) => Math.abs(a.net - l.revenue) / l.revenue - Math.abs(b.net - l.revenue) / l.revenue || (a.date < b.date ? -1 : 1));
-    const best = cands.find((i) => Math.abs(i.net - l.revenue) <= Math.max(0.25 * l.revenue, 1000));
-    if (best) { used.add(best.id); matches.set(l.id, best); }
-  }
-  // Second pass: one invoice can bill several campaigns of the same customer (e.g. branches, repeats).
-  for (const inv of allInv.filter((i) => !used.has(i.id))) {
-    const pool = billable.filter((l) => !matches.has(l.id) && k2(l.client) === k2(inv.client) && days(monthStart(l.month), inv.date) >= -45 && days(monthStart(l.month), inv.date) <= 185).slice(0, 12);
-    let best: SfpLine[] | null = null;
-    for (let mask = 1; mask < 1 << pool.length; mask++) {
-      const sub = pool.filter((_, i) => mask & (1 << i));
-      if (sub.length < 2) continue;
-      const sum = sub.reduce((a, l) => a + l.revenue, 0);
-      if (Math.abs(sum - inv.net) <= Math.max(0.02 * inv.net, 1000) && (!best || sub.length < best.length)) best = sub;
-    }
-    if (best) { used.add(inv.id); for (const l of best) matches.set(l.id, { ...inv, net: l.revenue, grouped: best.length }); }
-  }
+  const { matches, used, allInv, billable } = await matchCampaigns(db, lines, aliases);
   const inFyIds = new Set(inFy.map((l) => l.id));
   const notInvoiced = billable.filter((l) => inFyIds.has(l.id) && !matches.has(l.id) && l.month <= today.slice(0, 7))
     .map((l) => ({ id: l.id, month: l.month, client: l.client, code: l.code, source: l.source, revenue: l.revenue, platformFee: l.platformFee, status: l.status }));
@@ -263,3 +275,52 @@ export async function proposeAccruals(db: Db, items: { id: string; month: string
   });
 }
 export { fiscalYearOf };
+
+/** ISO dates found in the register's free-text "receiving date" field (e.g. "2026-07-07", "5th May 2026"). */
+function parseDates(text: string | null): string[] {
+  if (!text) return [];
+  const out: string[] = [];
+  for (const m of text.matchAll(/(\d{4})-(\d{2})-(\d{2})/g)) out.push(m[0]);
+  const months = ["january","february","march","april","may","june","july","august","september","october","november","december"];
+  for (const m of text.matchAll(/(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)\s+(\d{4})/g)) {
+    const mi = months.findIndex((x) => x.startsWith(m[2].toLowerCase().slice(0, 3)));
+    if (mi >= 0) out.push(`${m[3]}-${String(mi + 1).padStart(2, "0")}-${String(Number(m[1])).padStart(2, "0")}`);
+  }
+  return out.sort();
+}
+
+/**
+ * Pre-fills the "Received" folder from the accountant's invoice register: for every invoice with money
+ * received, the cash and the tax withheld by the customer are attached to the campaign(s) it billed
+ * (split by revenue when one invoice covers several campaigns). Earlier pre-filled entries are replaced;
+ * entries typed in by hand are never touched.
+ */
+export async function prefillReceived(db: Db, lines: SfpLine[], aliases: Record<string, string>, userId: number | null) {
+  const { matches } = await matchCampaigns(db, lines, aliases);
+  const inv = new Map((await db.query<any>("SELECT * FROM invoices WHERE coalesce(status,'') <> 'cancelled'")).map((i) => [i.id, i]));
+  const byInvoice = new Map<number, SfpLine[]>();
+  for (const l of lines) { const m = matches.get(l.id); if (m) { const a = byInvoice.get(m.id) ?? []; a.push(l); byInvoice.set(m.id, a); } }
+  const entries: { campaignId: string; date: string; amount: number; withheld: number; counterparty: string; reference: string; note: string }[] = [];
+  const unallocated: { number: string | null; client: string; received: number }[] = [];
+  for (const [id, i] of inv) {
+    const received = Number(i.received); if (received <= 0.5) continue;
+    const ls = byInvoice.get(id);
+    const withheld = Number(i.income_tax_withheld || 0) + Number(i.sales_tax_withheld || 0);
+    if (!ls) { unallocated.push({ number: i.number, client: i.client, received }); continue; }
+    const total = ls.reduce((a, l) => a + l.revenue, 0) || 1;
+    const dates = parseDates(i.received_dates);
+    const date = dates.length ? dates[dates.length - 1] : isoDate(i.invoice_date);
+    for (const l of ls) {
+      const share = l.revenue / total;
+      entries.push({ campaignId: l.id.split(":")[0], date, amount: Math.round(received * share * 100) / 100, withheld: Math.round(withheld * share * 100) / 100,
+        counterparty: i.billed_to || i.client, reference: `Invoice #${i.number ?? "–"} (books)`,
+        note: `Pre-filled from the accountant's invoice register${ls.length > 1 ? ` · invoice split over ${ls.length} campaigns` : ""}${l.id.includes(":") ? ` · ${l.month}` : ""}` });
+    }
+  }
+  await db.tx(async (q) => {
+    await q("DELETE FROM campaign_cash WHERE source = 'register'");
+    for (const e of entries) await q(`INSERT INTO campaign_cash (campaign_id, kind, entry_date, amount, withheld, counterparty, reference, note, source, created_by)
+      VALUES ($1,'received',$2,$3,$4,$5,$6,$7,'register',$8)`, [e.campaignId, e.date, e.amount, e.withheld, e.counterparty, e.reference, e.note, userId]);
+  });
+  return { entries: entries.length, received: entries.reduce((a, e) => a + e.amount, 0), withheld: entries.reduce((a, e) => a + e.withheld, 0), unallocated };
+}

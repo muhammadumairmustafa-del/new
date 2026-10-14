@@ -12,7 +12,7 @@ import { buildCashPlan } from "./cashplan.js";
 import { runChecks } from "./checks.js";
 import { DEFAULT_CASHPLAN, DEFAULT_TAX, getSetting, putSetting, type CashPlanSettings, type TaxSettings } from "./settings.js";
 import { statementsWorkbook } from "./export.js";
-import { DEFAULT_SFP, loadSfpLines, proposeAccruals, readSfpFromEnv, reconcile, storeSnapshot } from "./sfp.js";
+import { DEFAULT_SFP, loadSfpLines, matchCampaigns, prefillReceived, proposeAccruals, readSfpFromEnv, reconcile, storeSnapshot } from "./sfp.js";
 import { fiscalYearOf, fyRange, monthEnd, monthsBetween } from "../shared/fiscal.js";
 import { fromUnits, toUnits } from "../shared/money.js";
 
@@ -435,11 +435,24 @@ export function apiRouter(db: Db) {
       camp.set(id, c);
     }
     for (const e of rows) { const c = camp.get(e.campaign_id); if (c) { c[e.kind] += Number(e.amount); if (e.kind === "received") c.withheld += Number(e.withheld || 0); } }
+    // Invoice total: the actual invoice in the books where the campaign was billed, else revenue + sales tax.
+    const { matches } = await matchCampaigns(db, lines, sfpSet.clientAliases ?? {});
+    const gross = new Map((await db.query<any>("SELECT id, gross_amount FROM invoices")).map((i) => [i.id, Number(i.gross_amount)]));
+    const perInvoice = new Map<number, number>();
+    for (const l of lines) { const m = matches.get(l.id); if (m) perInvoice.set(m.id, (perInvoice.get(m.id) ?? 0) + l.revenue); }
+    for (const l of lines) {
+      if (l.month > thisMonth) continue;
+      const c = camp.get(l.id.split(":")[0]); if (!c) continue;
+      const m = matches.get(l.id);
+      const share = m ? l.revenue / (perInvoice.get(m.id) || l.revenue || 1) : 0;
+      c.invoiceTotal = (c.invoiceTotal ?? 0) + (m ? (gross.get(m.id) ?? 0) * share : l.revenue * (1 + sfpSet.gstRate));
+      if (m) c.invoiced = true;
+    }
     res.json({
       gstRate: sfpSet.gstRate,
       entries: rows.map((e) => ({ ...e, entry_date: isoDate(e.entry_date), amount: Number(e.amount), withheld: Number(e.withheld || 0) })),
       campaigns: [...camp.values()].filter((c) => c.revenue > 0 || c.received > 0 || c.paid > 0)
-        .map((c) => { const invoiceTotal = c.revenue * (1 + sfpSet.gstRate); return { ...c, invoiceTotal, toCollect: invoiceTotal - c.received - c.withheld, toPay: c.jazzShare - c.paid }; })
+        .map((c) => ({ ...c, invoiceTotal: c.invoiceTotal ?? 0, toCollect: (c.invoiceTotal ?? 0) - c.received - c.withheld, toPay: c.jazzShare - c.paid }))
         .sort((a, b) => (a.lastMonth < b.lastMonth ? 1 : -1)),
     });
   }));
@@ -451,6 +464,12 @@ export function apiRouter(db: Db) {
     await db.query("INSERT INTO campaign_cash (campaign_id, kind, entry_date, amount, withheld, counterparty, reference, note, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
       [b.campaignId, b.kind, b.date, b.amount, b.kind === "received" ? b.withheld : 0, b.counterparty ?? null, b.reference ?? null, b.note ?? null, req.user!.id]);
     await log(req, "campaign_cash.add", b); res.json({ ok: true });
+  }));
+  r.post("/campaign-cash/prefill", requireRole("partner"), wrap(async (req, res) => {
+    const { lines, settings } = await loadSfpLines(db);
+    if (!lines.length) return res.status(400).json({ error: "Sync Sales Flow Pro first" });
+    const r2 = await prefillReceived(db, lines, settings.clientAliases ?? {}, req.user!.id);
+    await log(req, "campaign_cash.prefill", { entries: r2.entries, received: r2.received }); res.json(r2);
   }));
   r.delete("/campaign-cash/:id", requireRole("accountant"), wrap(async (req, res) => {
     await db.query("DELETE FROM campaign_cash WHERE id = $1", [Number(req.params.id)]);

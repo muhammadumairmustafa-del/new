@@ -143,7 +143,10 @@ function NotInvoiced({ d }: { d: any }) {
 
 type Folder = "received" | "paid";
 function CampaignCash({ canEdit }: { canEdit: boolean }) {
+  const { meta } = usePeriod();
   const q = useApi<any>("/campaign-cash");
+  const [prefillMsg, setPrefillMsg] = useState<any>(null);
+  const prefill = useMut(() => api("/campaign-cash/prefill", { method: "POST" }));
   const [folder, setFolder] = useState<Folder>("received");
   const [add, setAdd] = useState<{ campaignId?: string } | null>(null);
   const del = useMut((id: number) => api(`/campaign-cash/${id}`, { method: "DELETE" }));
@@ -166,12 +169,19 @@ function CampaignCash({ canEdit }: { canEdit: boolean }) {
             <button key={f} onClick={() => setFolder(f)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-semibold ${folder === f ? "bg-muted text-foreground" : "text-muted-foreground hover:text-foreground"}`}>
               {f === "received" ? <FolderInput size={16} /> : <FolderOutput size={16} />}{f === "received" ? "Received" : "Paid"} <span className="text-xs font-normal">({entries.filter((e: any) => e.kind === f).length})</span>
             </button>))}
-        </div>} actions={canEdit && <Button onClick={() => setAdd({})}>{folder === "received" ? "Add amount received" : "Add amount paid"}</Button>}>
+        </div>} actions={<>
+          {folder === "received" && meta?.user?.role === "partner" && <Button variant="secondary" disabled={prefill.isPending} onClick={() => prefill.mutate(undefined, { onSuccess: (r: any) => setPrefillMsg(r), onError: (e: any) => setPrefillMsg({ error: e.message }) })}>{prefill.isPending ? "Pre-filling…" : "Pre-fill from books"}</Button>}
+          {canEdit && <Button onClick={() => setAdd({})}>{folder === "received" ? "Add amount received" : "Add amount paid"}</Button>}</>}>
+        {prefillMsg && <div className="px-5 pb-3">{prefillMsg.error ? <Callout tone="bad">{prefillMsg.error}</Callout> :
+          <Callout tone="info" title={`Pre-filled ${prefillMsg.entries} receipts from the invoice register: PKR ${pkr(prefillMsg.received)} cash + PKR ${pkr(prefillMsg.withheld)} withheld`}>
+            Entries marked <b>books</b> are replaced each time you pre-fill; entries you add by hand are kept.
+            {prefillMsg.unallocated.length > 0 && <> Receipts with no matching campaign in Sales Flow Pro (not added): {prefillMsg.unallocated.map((u: any) => `${u.client} #${u.number ?? "–"} (${pkr(u.received)})`).join("; ")}.</>}
+          </Callout>}</div>}
         {list.length === 0 ? <div className="px-5 py-8 text-sm text-muted-foreground text-center">Nothing in this folder yet.</div> : (
           <div className="overflow-x-auto"><table className="tbl">
             <thead><tr><th>Date</th><th>Campaign</th><th>{folder === "received" ? "From" : "To"}</th><th>Reference</th><th>Note</th>{folder === "received" && <th className="num">Tax withheld</th>}<th className="num">Amount</th><th></th></tr></thead>
             <tbody>{list.map((e: any) => { const c: any = name.get(e.campaign_id); return (
-              <tr key={e.id}><td className="whitespace-nowrap">{dmy(e.entry_date)}</td><td className="font-medium">{c ? `${c.client}` : e.campaign_id}<span className="text-xs text-muted-foreground"> {c?.code}</span></td>
+              <tr key={e.id}><td className="whitespace-nowrap">{dmy(e.entry_date)}</td><td className="font-medium">{c ? `${c.client}` : e.campaign_id}<span className="text-xs text-muted-foreground"> {c?.code}</span>{e.source === "register" && <> <Badge tone="info">books</Badge></>}</td>
                 <td>{e.counterparty ?? "–"}</td><td className="text-xs">{e.reference ?? "–"}</td><td className="text-xs text-muted-foreground max-w-xs truncate" title={e.note ?? ""}>{e.note ?? ""}</td>
                 {folder === "received" && <td className="num"><Money v={e.withheld || null} /></td>}
                 <td className="num font-semibold"><Money v={e.amount} /></td>
