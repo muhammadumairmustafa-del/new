@@ -9,7 +9,8 @@ import { isoDate } from "./ledger.js";
  * - invoice:     the invoice as issued; linked to its register row (whatever number the books gave it)
  *                and to the campaign(s) it bills. Not in the books → it still counts as invoiced and
  *                can be proposed as a journal entry.
- * - receipt:     money received that the books put on another invoice (or on no invoice); the receipt
+ * - receipt:     money received (gross = cash, gst = tax the customer withheld) that the register does not show
+ *                against the campaign it paid for — booked on another invoice, on none, or after the register's date; the receipt
  *                is moved to the campaign it actually paid for.
  * - jazz_billed: the customer was billed and paid by Jazz (release order / payment approval to PMCL);
  *                TonePerks' revenue is its share, to be invoiced to Jazz, with no platform fee.

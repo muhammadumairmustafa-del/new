@@ -33,7 +33,14 @@ export async function monthlyBreakdown(db: Db, s: Snapshot, from: string, to: st
   const fromM = from.slice(0, 7), toM = to.slice(0, 7);
   // All campaign-months up to the end month (earlier months take a campaign's cash first).
   const billable = lines.filter((l) => (l.revenue > 0 || l.campaignValue > 0) && !l.foc && l.month <= toM).sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
-  const left = new Map([...cash].map(([k, v]) => [k, { ...v }]));
+  // Entries recorded against a specific retainer month ("<campaign>:<YYYY-MM>") are applied to that month first;
+  // entries against the campaign as a whole are spread over its months, oldest first.
+  const left = new Map<string, { received: number; paid: number }>();
+  const forMonth = new Map<string, { received: number; paid: number }>();
+  for (const [k, v] of cash) {
+    const target = k.includes(":") ? forMonth : left;
+    const c = target.get(k) ?? { received: 0, paid: 0 }; c.received += v.received; c.paid += v.paid; target.set(k, c);
+  }
   const rows: CampaignMonth[] = billable.map((l0) => {
     const campaignId = l0.id.split(":")[0];
     const m = matches.get(l0.id);
@@ -43,10 +50,14 @@ export async function monthlyBreakdown(db: Db, s: Snapshot, from: string, to: st
     const l = aligned ? { ...l0, revenue: m.net, platformFee: l0.platformFee * (m.net / l0.revenue) } : l0;
     const share = m ? l0.revenue / (perInvoice.get(m.id) || l0.revenue || 1) : 0;
     const invoiceTotal = m ? ((m.gross ?? gross.get(m.id)) ?? 0) * share : l.revenue * (1 + settings.gstRate);
+    const own = forMonth.get(l0.id) ?? { received: 0, paid: 0 };
     const c = left.get(campaignId) ?? { received: 0, paid: 0 };
-    const received = Math.min(c.received, invoiceTotal); c.received -= received;
-    const jazzPaid = Math.min(c.paid, l.platformFee); c.paid -= jazzPaid;
-    left.set(campaignId, c);
+    const r1 = Math.min(own.received, invoiceTotal); own.received -= r1;
+    const r2 = Math.min(c.received, invoiceTotal - r1); c.received -= r2;
+    const p1 = Math.min(own.paid, l.platformFee); own.paid -= p1;
+    const p2 = Math.min(c.paid, l.platformFee - p1); c.paid -= p2;
+    const received = r1 + r2, jazzPaid = p1 + p2;
+    left.set(campaignId, c); forMonth.set(l0.id, own);
     const jazzToPay = l.platformFee - jazzPaid;
     const collectFrom = l.source === "callperks_sourced" && !l.billedByJazz ? "customer" : "Jazz";
     return {
@@ -58,9 +69,10 @@ export async function monthlyBreakdown(db: Db, s: Snapshot, from: string, to: st
     };
   });
   // Any cash left over (more received than invoiced) stays on the campaign's last month.
-  for (const [id, c] of left) {
+  for (const [id0, c] of [...left, ...forMonth]) {
     if (c.received <= 0.5) continue;
-    const last = [...rows].reverse().find((r) => r.campaignId === id);
+    const id = id0.split(":")[0];
+    const last = [...rows].reverse().find((r) => r.id === id0) ?? [...rows].reverse().find((r) => r.campaignId === id);
     if (last) { last.received += c.received; last.toCollect = Math.max(last.invoiceTotal - last.received, 0); }
   }
   const months = monthsBetween(from, to);

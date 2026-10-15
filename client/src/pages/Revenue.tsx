@@ -181,8 +181,8 @@ function CampaignCash({ canEdit }: { canEdit: boolean }) {
         {list.length === 0 ? <div className="px-5 py-8 text-sm text-muted-foreground text-center">Nothing in this folder yet.</div> : (
           <div className="overflow-x-auto"><table className="tbl">
             <thead><tr><th>Date</th><th>Campaign</th><th>{folder === "received" ? "From" : "To"}</th><th>Reference</th><th>Note</th>{folder === "received" && <th className="num">Tax withheld</th>}<th className="num">Amount</th><th></th></tr></thead>
-            <tbody>{list.map((e: any) => { const c: any = name.get(e.campaign_id); return (
-              <tr key={e.id}><td className="whitespace-nowrap">{dmy(e.entry_date)}</td><td className="font-medium">{c ? `${c.client}` : e.campaign_id}<span className="text-xs text-muted-foreground"> {c?.code}</span>{e.source === "register" && <> <Badge tone="info">books</Badge></>}</td>
+            <tbody>{list.map((e: any) => { const c: any = name.get(String(e.campaign_id).split(":")[0]); const month = String(e.campaign_id).split(":")[1]; return (
+              <tr key={e.id}><td className="whitespace-nowrap">{dmy(e.entry_date)}</td><td className="font-medium">{c ? `${c.client}` : e.campaign_id}<span className="text-xs text-muted-foreground"> {c?.code}{month ? ` · ${monthLabel(month)}` : ""}</span>{e.source === "register" && <> <Badge tone="info">books</Badge></>}</td>
                 <td>{e.counterparty ?? "–"}</td><td className="text-xs">{e.reference ?? "–"}</td><td className="text-xs text-muted-foreground max-w-xs truncate" title={e.note ?? ""}>{e.note ?? ""}</td>
                 {folder === "received" && <td className="num"><Money v={e.withheld || null} /></td>}
                 <td className="num font-semibold"><Money v={e.amount} /></td>

@@ -333,10 +333,19 @@ export async function prefillReceived(db: Db, lines: SfpLine[], aliases: Record<
     const l = linkedLines(d, lines)[0];
     if (!l) continue;
     const b = resolveBooks(d, [...inv.values()]);
-    if (b && byInvoice.get(b.id)?.some((x) => x.id.split(":")[0] === l.id.split(":")[0])) continue; // already on the right campaign
-    if (b) moved.set(b.id, (moved.get(b.id) ?? 0) + d.gross);
-    entries.push({ campaignId: l.id.split(":")[0], date: d.docDate ?? isoDate(new Date()), amount: d.gross, withheld: 0, counterparty: d.billedTo || d.client,
-      reference: d.title ?? "Bank receipt", note: `Per bank receipt in the invoice folder${b ? ` · the books put it on #${b.number ?? "–"} ${b.client}` : ""}` });
+    // for a receipt, `gst` holds the tax the customer withheld from the payment
+    let cash = d.gross, wht = d.gst || 0;
+    const onRight = !!b && !!byInvoice.get(b.id)?.some((x) => x.id.split(":")[0] === l.id.split(":")[0]);
+    if (onRight) {
+      // Already on the right campaign: add only what the register does not show yet (e.g. paid after its date).
+      const booked = Number(b.received) + Number(b.income_tax_withheld || 0) + Number(b.sales_tax_withheld || 0);
+      const extra = cash + wht - booked;
+      if (extra <= 0.5) continue;
+      const f = extra / (cash + wht); cash *= f; wht *= f;
+    } else if (b) moved.set(b.id, (moved.get(b.id) ?? 0) + cash + wht);
+    entries.push({ campaignId: l.id, date: d.docDate ?? isoDate(new Date()), amount: Math.round(cash * 100) / 100, withheld: Math.round(wht * 100) / 100, counterparty: d.billedTo || d.client,
+      reference: d.title ?? "Bank receipt",
+      note: onRight ? `Per the bank: received after the register's date (#${b!.number ?? "–"})` : `Per bank receipt in the invoice folder${b ? ` · the books put it on #${b.number ?? "–"} ${b.client}` : ""}` });
   }
   for (const [id, i] of inv) {
     const received = Number(i.received) - (moved.get(id) ?? 0); if (received <= 0.5) continue;
@@ -348,7 +357,7 @@ export async function prefillReceived(db: Db, lines: SfpLine[], aliases: Record<
     const date = dates.length ? dates[dates.length - 1] : isoDate(i.invoice_date);
     for (const l of ls) {
       const share = l.revenue / total;
-      entries.push({ campaignId: l.id.split(":")[0], date, amount: Math.round(received * share * 100) / 100, withheld: Math.round(withheld * share * 100) / 100,
+      entries.push({ campaignId: l.id, date, amount: Math.round(received * share * 100) / 100, withheld: Math.round(withheld * share * 100) / 100,
         counterparty: i.billed_to || i.client, reference: `Invoice #${i.number ?? "–"} (books)`,
         note: `Pre-filled from the accountant's invoice register${ls.length > 1 ? ` · invoice split over ${ls.length} campaigns` : ""}${l.id.includes(":") ? ` · ${l.month}` : ""}` });
     }

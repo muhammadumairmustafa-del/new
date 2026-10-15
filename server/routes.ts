@@ -439,7 +439,7 @@ export function apiRouter(db: Db) {
       if (l.month < c.firstMonth) c.firstMonth = l.month; if (l.month > c.lastMonth) c.lastMonth = l.month;
       camp.set(id, c);
     }
-    for (const e of rows) { const c = camp.get(e.campaign_id); if (c) { c[e.kind] += Number(e.amount); if (e.kind === "received") c.withheld += Number(e.withheld || 0); } }
+    for (const e of rows) { const c = camp.get(String(e.campaign_id).split(":")[0]); if (c) { c[e.kind] += Number(e.amount); if (e.kind === "received") c.withheld += Number(e.withheld || 0); } }
     // Invoice total: the actual invoice in the books where the campaign was billed, else revenue + sales tax.
     const { matches } = await matchCampaigns(db, lines, sfpSet.clientAliases ?? {});
     const gross = new Map((await db.query<any>("SELECT id, gross_amount FROM invoices")).map((i) => [i.id, Number(i.gross_amount)]));
