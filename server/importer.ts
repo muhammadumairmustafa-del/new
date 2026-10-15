@@ -91,7 +91,7 @@ export async function parseWorkbook(buf: Buffer) {
       const k = { no: g(/^Invoice ?#$/i), date: g(/^Invoice date$/i), client: g(/^Client/i), billed: g(/^Billed to/i), camp: g(/^Campaign period/i),
         net: g(/^Sales amount/i), jazz: g(/^Jazz share/i), rate: g(/^GST rate/i), gst: g(/^GST$/i), gross: g(/^Sales incl/i),
         itw: g(/^Income tax withheld/i), stw: g(/^Sales tax withheld/i), rec: g(/^Received$/i), diff: g(/^Difference|^Outstanding/i),
-        rdate: g(/^Receiving Date/i), notes: g(/^Status/i) };
+        rdate: g(/^Receiving Date/i), notes: g(/^Status|^Remarks|^Notes?$/i), settled: g(/^Settlement|^Bad debts?/i) };
       const rows: ParsedInvoice[] = [];
       for (let r = ih.row + 1; r <= ws.rowCount; r++) {
         const row = ws.getRow(r); const v = (i: number) => (i ? val(row.getCell(i)) : null);
@@ -101,7 +101,8 @@ export async function parseWorkbook(buf: Buffer) {
         rows.push({ number: norm(v(k.no)) || null, date, client, billedTo: norm(v(k.billed)), campaignPeriod: norm(v(k.camp)),
           netAmount: num(v(k.net)), jazzShare: num(v(k.jazz)), gstRate: num(v(k.rate)), gst: num(v(k.gst)), grossAmount: num(v(k.gross)),
           incomeTaxWithheld: num(v(k.itw)), salesTaxWithheld: num(v(k.stw)), received: num(v(k.rec)), outstanding: num(v(k.diff)),
-          receivedDates: rd instanceof Date ? iso(rd) : norm(rd) || null, notes: norm(v(k.notes)) || null });
+          receivedDates: rd instanceof Date ? iso(rd) : norm(rd) || null,
+          notes: [norm(v(k.notes)), num(v(k.settled)) ? `Written off / settled: ${num(v(k.settled)).toLocaleString("en-US")}` : ""].filter(Boolean).join(" · ") || null });
       }
       invoices = { sheet: ws.name, rows };
     }
@@ -274,12 +275,14 @@ export async function importWorkbook(db: Db, buf: Buffer, fileName: string, opts
     for (const [p, r] of Object.entries(impliedRatios)) {
       await q("UPDATE partners SET ratio = $2 WHERE name = $1", [p, r]);
     }
-    // Invoice register is cumulative: replace, but keep user-entered collection expectations.
-    if (invoices) {
+    // Replace the register for the dates this file covers (a year-end file must not wipe later invoices
+    // that came from a quarterly file), keeping user-entered collection expectations.
+    if (invoices && invoices.rows.length) {
       const prev = await q<any>("SELECT number, client, invoice_date, expected_date, collection_probability, status FROM invoices");
       const key = (n: string | null, c: string, d: string) => `${n ?? ""}|${c}|${isoDate(d)}`;
       const keep = new Map(prev.map((p) => [key(p.number, p.client, p.invoice_date), p]));
-      await q("DELETE FROM invoices");
+      const dates = invoices.rows.map((r) => r.date).sort();
+      await q("DELETE FROM invoices WHERE invoice_date BETWEEN $1 AND $2", [dates[0], dates[dates.length - 1]]);
       for (const r of invoices.rows) {
         const k = keep.get(key(r.number, r.client, r.date));
         await q(`INSERT INTO invoices (number, invoice_date, client, billed_to, campaign_period, net_amount, jazz_share, gst_rate, gst, gross_amount,
