@@ -9,3 +9,6 @@ dist-server/
 *.xls
 *.csv
 uploads/
+
+# Transcripts produced by tools/youtube-transcribe
+tools/youtube-transcribe/output/
