@@ -22,6 +22,12 @@ Useful flags:
 | `--no-whisper` | Skip videos without captions instead of downloading audio |
 | `--whisper-model base` | Smaller/faster Whisper model (`tiny`, `base`, `small`, `medium`) |
 | `--out output` | Output folder |
+| `--cookies-from-browser chrome` | Use your YouTube login from `chrome`, `firefox`, `safari`, `edge` or `brave`. Fixes `HTTP Error 429` / "Sign in to confirm you're not a bot" |
+| `--delay 10` | Seconds to wait between videos (raise it if you still get 429s) |
+
+### `HTTP Error 429: Too Many Requests`
+
+YouTube is rate-limiting your connection. Log in to youtube.com in your browser, then add `--cookies-from-browser chrome` (or your browser). On a Mac, Safari needs Terminal to have Full Disk Access (System Settings → Privacy & Security), so Chrome or Firefox is easier. Already finished videos are skipped when you run it again.
 
 ## Output
 

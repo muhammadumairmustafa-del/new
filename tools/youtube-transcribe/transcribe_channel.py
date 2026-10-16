@@ -18,7 +18,6 @@ import re
 import sys
 import tempfile
 import time
-import urllib.request
 from pathlib import Path
 
 import yt_dlp
@@ -26,25 +25,21 @@ from deep_translator import GoogleTranslator
 
 CHUNK_CHARS = 4500  # Google Translate rejects requests over 5000 chars
 
+# shared yt-dlp options; main() adds browser cookies when --cookies-from-browser is given
+YDL_BASE = {"quiet": True, "no_warnings": True, "retries": 10,
+            "extractor_retries": 5, "sleep_interval_subtitles": 3}
+
+
+def is_rate_limited(exc):
+    return "429" in str(exc) or "Too Many Requests" in str(exc)
+
 
 def list_videos(channel_url):
-    opts = {"extract_flat": True, "quiet": True, "skip_download": True}
+    opts = {**YDL_BASE, "extract_flat": True, "skip_download": True}
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(channel_url, download=False)
     return [{"id": e["id"], "title": e.get("title") or e["id"]}
             for e in info.get("entries", []) if e.get("id")]
-
-
-def pick_caption_url(info, src_lang):
-    for key in ("subtitles", "automatic_captions"):
-        tracks = info.get(key) or {}
-        # exact language first, then variants like "en-US" / "en-orig"
-        langs = [src_lang] + sorted(l for l in tracks if l.startswith(src_lang + "-"))
-        for lang in langs:
-            for fmt in tracks.get(lang, []):
-                if fmt.get("ext") == "json3":
-                    return fmt["url"]
-    return None
 
 
 def json3_to_text(data):
@@ -63,20 +58,34 @@ def json3_to_text(data):
 
 
 def captions_transcript(video_url, src_lang):
-    with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True}) as ydl:
-        info = ydl.extract_info(video_url, download=False)
-    url = pick_caption_url(info, src_lang)
-    if not url:
-        return None
-    with urllib.request.urlopen(url) as resp:
-        return json3_to_text(json.load(resp))
+    """Let yt-dlp download the caption file itself: it sends the headers/cookies
+    YouTube expects, so it gets rate-limited far less than a bare request."""
+    with tempfile.TemporaryDirectory() as tmp:
+        opts = {**YDL_BASE, "skip_download": True,
+                "writesubtitles": True, "writeautomaticsub": True,
+                "subtitleslangs": [src_lang, f"{src_lang}-.*"],
+                "subtitlesformat": "json3",
+                "outtmpl": str(Path(tmp) / "subs.%(ext)s")}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            requested = info.get("requested_subtitles") or {}
+            if not requested:
+                return None
+            # download only one track (exact language preferred), not every variant
+            lang = src_lang if src_lang in requested else sorted(requested)[0]
+            info["requested_subtitles"] = {lang: requested[lang]}
+            ydl.process_info(info)
+        files = sorted(Path(tmp).glob("*.json3"))
+        if not files:
+            raise RuntimeError("caption download failed")
+        return json3_to_text(json.loads(files[0].read_text(encoding="utf-8")))
 
 
 def whisper_transcript(video_url, model_size, src_lang):
     from faster_whisper import WhisperModel  # imported lazily: heavy dependency
 
     with tempfile.TemporaryDirectory() as tmp:
-        opts = {"quiet": True, "format": "bestaudio/best",
+        opts = {**YDL_BASE, "format": "bestaudio/best",
                 "outtmpl": str(Path(tmp) / "audio.%(ext)s")}
         with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(video_url, download=True)
@@ -138,7 +147,13 @@ def main():
     p.add_argument("--limit", type=int, help="only process the first N videos")
     p.add_argument("--whisper-model", default="small", help="Whisper size if captions are missing")
     p.add_argument("--no-whisper", action="store_true", help="skip videos without captions")
+    p.add_argument("--cookies-from-browser", metavar="BROWSER",
+                   help="use your YouTube login from chrome/firefox/safari/edge/brave to avoid 429 errors")
+    p.add_argument("--delay", type=float, default=10, help="seconds to wait between videos (default: 10)")
     args = p.parse_args()
+
+    if args.cookies_from_browser:
+        YDL_BASE["cookiesfrombrowser"] = (args.cookies_from_browser,)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -160,24 +175,38 @@ def main():
             if src_file.exists():
                 transcript = src_file.read_text(encoding="utf-8")
             else:
-                transcript = captions_transcript(url, args.source_lang)
-                source = "captions"
+                transcript, source, caption_error = None, "captions", "no captions available"
+                for wait in (30, 90, None):
+                    try:
+                        transcript = captions_transcript(url, args.source_lang)
+                        break
+                    except Exception as exc:
+                        caption_error = f"captions: {exc}"
+                        if wait is None or not is_rate_limited(exc):
+                            break
+                        print(f"    YouTube rate limit (429), waiting {wait}s...")
+                        time.sleep(wait)
                 if not transcript:
                     if args.no_whisper:
-                        raise RuntimeError("no captions available")
-                    print("    no captions, transcribing audio with Whisper...")
+                        raise RuntimeError(caption_error)
+                    print(f"    {caption_error} -> transcribing audio with Whisper instead...")
                     transcript = whisper_transcript(url, args.whisper_model, args.source_lang)
                     source = "whisper"
                 header = f"{v['title']}\n{url}\n(transcript source: {source})\n\n"
                 src_file.write_text(header + transcript, encoding="utf-8")
                 transcript = header + transcript
             if not dst_file.exists():
-                dst_file.write_text(translate(transcript, args.source_lang, args.lang), encoding="utf-8")
+                try:
+                    translated = translate(transcript, args.source_lang, args.lang)
+                except Exception as exc:
+                    raise RuntimeError(f"translation: {exc}") from exc
+                dst_file.write_text(translated, encoding="utf-8")
         except Exception as exc:
             status = f"error: {exc}"
             print(f"    {status}")
         index_rows.append([n, v["id"], v["title"], url, src_file.name, dst_file.name, status])
-        time.sleep(1)  # be polite to YouTube
+        if n < len(videos):
+            time.sleep(args.delay)  # spacing requests out avoids YouTube's rate limit
 
     with open(out_dir / "index.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
