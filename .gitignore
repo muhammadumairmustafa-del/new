@@ -12,3 +12,22 @@ uploads/
 
 # Transcripts produced by tools/youtube-transcribe
 tools/youtube-transcribe/output/
+
+# --- added by laptop archive ---
+node_modules/
+.next/
+dist/
+Pods/
+.expo/
+.venv/
+venv/
+__pycache__/
+.turbo/
+.cxx/
+.DS_Store
+*.apk
+*.aab
+*.ipa
+.env
+.env.*
+!.env.example
